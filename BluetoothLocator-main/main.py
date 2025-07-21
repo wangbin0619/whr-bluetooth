@@ -13,6 +13,7 @@ import yaml
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from tkinter import filedialog
 
 
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
@@ -796,6 +797,32 @@ class MQTTDataProcessor:
                 self.fn_message(error_message) if self.fn_message else None
                 return False
         return False
+    def process_local_bluetooth_file(self,file_path="data.xlsx"):
+        if not os.path.exists(file_path):
+            print(f"本地蓝牙数据文件不存在：{file_path}")
+            return
+        try:
+            df = pd.read_excel(file_path,sheet_name="蓝牙数据")
+            grouped = df.groupby(['device_id', 'timestamp'])
+            for (device_id, timestamp), group in grouped:
+                # 组装成和 handle_bluetooth_position_data 一样的格式
+                # 格式: mac,rssi,rotation;mac,rssi,rotation;...;device_id
+                items = [
+                    f"{row['mac']},{int(row['rssi'])},{int(row['rotation'])}"
+                    for _, row in group.iterrows()
+                ]
+                data_str = ";".join(items) + f";{device_id}"
+                try:
+                    bluetooth_results = self.handle_bluetooth_position_data(data_str)
+                    self.calculate_location_for_visualization(bluetooth_results)
+                    self.calculate_and_save_location(bluetooth_results)
+                except Exception as e:
+                    print(f"处理本地蓝牙数据时出错: {e}")
+
+            print("本地蓝牙数据处理完成。")
+        except Exception as e:
+            print(f"读取Excel文件失败: {e}")
+            
 
 
 class DataMonitorGUI:
@@ -879,6 +906,9 @@ class DataMonitorGUI:
         self.clear_button = ttk.Button(
             button_row1, text="清空日志", command=self.clear_log)
         self.clear_button.pack(side=tk.LEFT)
+
+        # 新增：导入本地蓝牙数据按钮
+        ttk.Button(button_row1, text="导入本地蓝牙数据", command=self.import_local_bluetooth_file).pack(side=tk.LEFT, padx=(0, 10))
 
         # 第二行按钮 - 记录控制
         button_row2 = ttk.Frame(button_frame)
@@ -1481,6 +1511,16 @@ class DataMonitorGUI:
         self.lat_entry.delete(0, tk.END)
         self.alt_entry.delete(0, tk.END)
 
+    def import_local_bluetooth_file(self):
+        file_path = filedialog.askopenfilename(
+            title="选择本地蓝牙数据Excel文件",
+            filetypes=[("Excel文件", "*.xlsx *.xls")]
+        )
+        if not file_path:
+            return
+        self.processor.process_local_bluetooth_file(file_path)
+        self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已导入本地蓝牙数据文件: {file_path}")
+
     def pause_recording(self):
         """暂停数据记录"""
         if self.processor:
@@ -1583,6 +1623,7 @@ class DataMonitorGUI:
 
 
 def main():
+    mode = "serves"#"file"
     # 创建配置管理器
     config_mgr = config_manager
     
@@ -1598,8 +1639,11 @@ def main():
     processor.on_location(gui.add_location_to_history)  # 传递位置更新函数
     processor.on_gui_message(gui.message_queue.put)  # 传递日志更新函数
 
+    if mode == "file":
+        processor.process_local_bluetooth_file()
     # 运行GUI
-    gui.run()
+    else :
+        gui.run()
 
 
 if __name__ == "__main__":
