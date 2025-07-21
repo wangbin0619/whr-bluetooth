@@ -908,7 +908,11 @@ class DataMonitorGUI:
         self.clear_button.pack(side=tk.LEFT)
 
         # 新增：导入本地蓝牙数据按钮
-        ttk.Button(button_row1, text="导入本地蓝牙数据", command=self.import_local_bluetooth_file).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_row1, text="导入本地蓝牙数据", command=self.import_local_bluetooth_file).pack(side=tk.LEFT, padx=(10, 10))
+        # 新增：使用本地蓝牙数据按钮
+        ttk.Button(button_row1, text="使用本地蓝牙数据", command=self.use_default_local_bluetooth_file).pack(side=tk.LEFT, padx=(10, 10))
+        # 新增：测试按钮
+        ttk.Button(button_row1, text="测试", command=self.test_first_timestamp_local_bluetooth_file).pack(side=tk.LEFT, padx=(10, 10))
 
         # 第二行按钮 - 记录控制
         button_row2 = ttk.Frame(button_frame)
@@ -1096,8 +1100,10 @@ class DataMonitorGUI:
 
                     if len(device_lons) > 1:
                         self.ax.plot(device_lons, device_lats, color=color,
-                                     alpha=0.6, linewidth=2, label=f'设备{device_id}轨迹')
-
+                                     alpha=0.6, linewidth=2, label=f'设备{color_index}轨迹')
+                        for idx, (lon, lat) in enumerate(zip(device_lons, device_lats), start=1):
+                            if idx % 2 == 0 and idx != len(device_lons):
+                                self.ax.annotate(f"{idx}", (lon, lat), xytext=(10, -10), textcoords='offset points', fontsize=10, color=color)
                     # 绘制该设备的当前位置
                     if device_history:
                         current = device_history[-1]
@@ -1106,7 +1112,7 @@ class DataMonitorGUI:
                                         alpha=0.9, edgecolors='black', linewidth=2)
                         
                         # 添加设备ID标签
-                        self.ax.annotate(f'设备{device_id}', 
+                        self.ax.annotate(f'设备{color_index}', 
                                         (current['longitude'], current['latitude']),
                                         xytext=(10, 10), textcoords='offset points', 
                                         fontsize=10, fontweight='bold',
@@ -1125,6 +1131,9 @@ class DataMonitorGUI:
             self.ax.set_title("蓝牙信标定位可视化")
             self.ax.set_xlabel("经度")
             self.ax.set_ylabel("纬度")
+            self.ax.ticklabel_format(style='plain', useOffset=False, axis='both')
+            self.ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
+            self.ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
             self.ax.grid(True, alpha=0.3)
             self.ax.legend()
 
@@ -1521,6 +1530,41 @@ class DataMonitorGUI:
         self.processor.process_local_bluetooth_file(file_path)
         self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已导入本地蓝牙数据文件: {file_path}")
 
+    def use_default_local_bluetooth_file(self):
+        """直接处理默认本地蓝牙数据文件（如data.xlsx）"""
+        default_file = "data.xlsx"
+        self.processor.process_local_bluetooth_file(default_file)
+        self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理默认本地蓝牙数据文件: {default_file}")
+
+    def test_first_timestamp_local_bluetooth_file(self):
+        """只处理本地默认蓝牙数据文件的第一个时间戳的数据"""
+        import pandas as pd
+        import os
+        default_file = "data.xlsx"
+        if not os.path.exists(default_file):
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 默认本地蓝牙数据文件不存在: {default_file}")
+            return
+        try:
+            df = pd.read_excel(default_file, sheet_name="蓝牙数据")
+            grouped = df.groupby(['device_id', 'timestamp'])
+            # 只取第一个分组
+            for (device_id, timestamp), group in grouped:
+                items = [
+                    f"{row['mac']},{int(row['rssi'])},{int(row['rotation'])}"
+                    for _, row in group.iterrows()
+                ]
+                data_str = ";".join(items) + f";{device_id}"
+                try:
+                    bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
+                    self.processor.calculate_location_for_visualization(bluetooth_results)
+                    self.processor.calculate_and_save_location(bluetooth_results)
+                except Exception as e:
+                    self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
+                break  # 只处理第一个分组
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已测试处理默认本地蓝牙数据文件的第一个时间戳: {default_file}")
+        except Exception as e:
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
+
     def pause_recording(self):
         """暂停数据记录"""
         if self.processor:
@@ -1623,7 +1667,6 @@ class DataMonitorGUI:
 
 
 def main():
-    mode = "serves"#"file"
     # 创建配置管理器
     config_mgr = config_manager
     
@@ -1639,8 +1682,6 @@ def main():
     processor.on_location(gui.add_location_to_history)  # 传递位置更新函数
     processor.on_gui_message(gui.message_queue.put)  # 传递日志更新函数
 
-    if mode == "file":
-        processor.process_local_bluetooth_file()
     # 运行GUI
     else :
         gui.run()
