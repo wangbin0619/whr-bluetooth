@@ -1201,7 +1201,7 @@ class DataMonitorGUI:
                     all_lats.extend(device_lats)
                     if len(device_lons) > 1:
                         self.ax.plot(device_lons, device_lats, color=color,
-                                     alpha=0.6, linewidth=2, label=f'方法trilateration轨迹test')
+                                     alpha=0.6, linewidth=2, label=f'方法trilateration轨迹')
                         for idx, (lon, lat) in enumerate(zip(device_lons, device_lats), start=1):
                             if idx % 2 == 0 and idx != len(device_lons):
                                 self.ax.annotate(f"{idx}", (lon, lat), xytext=(10, -10), textcoords='offset points', fontsize=10, color=color)
