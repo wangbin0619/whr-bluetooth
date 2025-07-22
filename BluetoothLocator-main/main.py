@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from tkinter import filedialog
+import numpy as np
 
 
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
@@ -383,6 +384,42 @@ class BeaconLocationCalculator:
                       w in zip(beacon_positions, weights)) / total_weight
 
         return [lat, lon]
+
+    def normal_trilateral(self, beacon_positions, distances):
+        """
+        线性三边定位算法（二维）
+        beacon_positions: [(lat1, lon1), (lat2, lon2), (lat3, lon3), ...]
+        distances: [d1, d2, d3, ...]
+        返回: [lat, lon] 或 None
+        """
+        import numpy as np
+        n = len(beacon_positions)
+        if n < 3 or len(distances) < 3:
+            return None
+        # 只取前3个信标
+        positions = beacon_positions[:3]
+        ds = distances[:3]
+        # 构造a矩阵和b矩阵
+        a = np.zeros((2, 2))
+        b = np.zeros((2, 1))
+        for i in range(2):
+            a[i][0] = 2 * (positions[i][0] - positions[2][0])
+            a[i][1] = 2 * (positions[i][1] - positions[2][1])
+        for i in range(2):
+            b[i][0] = (
+                positions[i][0] ** 2 - positions[2][0] ** 2
+                + positions[i][1] ** 2 - positions[2][1] ** 2
+                + ds[2] ** 2 - ds[i] ** 2
+            )
+        try:
+            # 求解线性方程组 a * [x, y]^T = b
+            result = np.linalg.solve(a, b)
+            lat = result[0][0]
+            lon = result[1][0]
+            return [lat, lon]
+        except Exception as e:
+            print(f"trilateral线性解算失败: {e}")
+            return None
 
     def calculate_terminal_location(self, bluetooth_readings, method="trilateration"):
         """
@@ -788,7 +825,7 @@ class MQTTDataProcessor:
                 error_message = f"[{datetime.now().strftime('%H:%M:%S')}] 断开MQTT连接时出错: {str(e)}"
                 self.fn_message(error_message) if self.fn_message else None
     
-    def change_mqtt_topic(self, new_topic):
+    def change_mqtt_topic(self, new_topic):   
         """更改MQTT主题订阅"""
         if hasattr(self, 'client') and self.client and self.current_topic:
             try:
@@ -811,6 +848,7 @@ class MQTTDataProcessor:
                 self.fn_message(error_message) if self.fn_message else None
                 return False
         return False
+    
     def process_local_bluetooth_file(self,file_path="data.xlsx"):
         if not os.path.exists(file_path):
             print(f"本地蓝牙数据文件不存在：{file_path}")
@@ -1190,7 +1228,8 @@ class DataMonitorGUI:
                 method_colors = {
                     "trilateration": "red",
                     "weighted_centroid": "green",
-                    "simple_centroid": "orange"
+                    "simple_centroid": "orange",
+                    "normal_trilateral": "purple"
                 }
                 all_lons = beacon_lons.copy()
                 all_lats = beacon_lats.copy()
@@ -1486,6 +1525,7 @@ class DataMonitorGUI:
     def clear_location_history(self):
         """清空位置历史"""
         self.location_history.clear()
+        self.location_history_method.clear()
         self.update_visualization()
 
     def refresh_beacon_list(self):
@@ -1697,7 +1737,7 @@ class DataMonitorGUI:
             try:
                 bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
                 # 多方法处理
-                methods = ["trilateration", "weighted_centroid", "simple_centroid"]
+                methods = ["trilateration", "weighted_centroid", "simple_centroid",'normal_trilateral']
                 for method in methods:
                     location_result = self.processor.location_calculator.calculate_terminal_location(bluetooth_results, method=method)
                     if location_result and location_result["status"] in ["success", "fallback"]:
