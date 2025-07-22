@@ -803,8 +803,8 @@ class MQTTDataProcessor:
             return
         try:
             df = pd.read_excel(file_path,sheet_name="蓝牙数据")
-            grouped = df.groupby(['device_id', 'timestamp'])
-            for (device_id, timestamp), group in grouped:
+            grouped = df.groupby(['device_id','timestamp','id'])
+            for (device_id, timestamp,id), group in grouped:
                 # 组装成和 handle_bluetooth_position_data 一样的格式
                 # 格式: mac,rssi,rotation;mac,rssi,rotation;...;device_id
                 items = [
@@ -840,6 +840,11 @@ class DataMonitorGUI:
         # MQTT客户端管理
         self.mqtt_client = None
         self.mqtt_thread = None
+
+        # 测试模式相关变量
+        self.test_mode = False
+        self.test_data = []
+        self.test_index = 0
 
         self.setup_gui()
 
@@ -912,7 +917,10 @@ class DataMonitorGUI:
         # 新增：使用本地蓝牙数据按钮
         ttk.Button(button_row1, text="使用本地蓝牙数据", command=self.use_default_local_bluetooth_file).pack(side=tk.LEFT, padx=(10, 10))
         # 新增：测试按钮
-        ttk.Button(button_row1, text="测试", command=self.test_first_timestamp_local_bluetooth_file).pack(side=tk.LEFT, padx=(10, 10))
+        ttk.Button(button_row1, text="测试", command=self.start_test_mode).pack(side=tk.LEFT, padx=(10, 10))
+        # 新增：下一条按钮
+        self.next_test_button = ttk.Button(button_row1, text="下一条", command=self.next_test_data, state="disabled")
+        self.next_test_button.pack(side=tk.LEFT, padx=(10, 10))
 
         # 第二行按钮 - 记录控制
         button_row2 = ttk.Frame(button_frame)
@@ -1033,6 +1041,9 @@ class DataMonitorGUI:
             side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="清空历史",
                    command=self.clear_location_history).pack(side=tk.LEFT)
+        # 新增：下一条按钮（可视化tab）
+        self.next_test_button_viz = ttk.Button(control_frame, text="下一条", command=self.next_test_data, state="disabled")
+        self.next_test_button_viz.pack(side=tk.LEFT, padx=(10, 10))
 
         # 创建matplotlib图形
         self.fig = Figure(figsize=(10, 8), dpi=100)
@@ -1565,6 +1576,66 @@ class DataMonitorGUI:
         except Exception as e:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
 
+    def start_test_mode(self):
+        import pandas as pd
+        import os
+        default_file = "data.xlsx"
+        self.test_data = []
+        self.test_index = 0
+        self.test_mode = True
+        if not os.path.exists(default_file):
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 默认本地蓝牙数据文件不存在: {default_file}")
+            self.next_test_button.config(state="disabled")
+            self.next_test_button_viz.config(state="disabled")
+            return
+        try:
+            df = pd.read_excel(default_file, sheet_name="蓝牙数据")
+            grouped = df.groupby(['device_id', 'timestamp', 'id'])
+            for key, group in grouped:
+                self.test_data.append((key, group))
+            if self.test_data:
+                self.next_test_button.config(state="normal")
+                self.next_test_button_viz.config(state="normal")
+                self.process_test_data(0)
+            else:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 没有可用的测试数据")
+                self.next_test_button.config(state="disabled")
+                self.next_test_button_viz.config(state="disabled")
+        except Exception as e:
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
+            self.next_test_button.config(state="disabled")
+            self.next_test_button_viz.config(state="disabled")
+
+    def process_test_data(self, index):
+        if 0 <= index < len(self.test_data):
+            (device_id, timestamp, id_), group = self.test_data[index]
+            items = [
+                f"{row['mac']},{int(row['rssi'])},{int(row['rotation'])}"
+                for _, row in group.iterrows()
+            ]
+            data_str = ";".join(items) + f";{device_id}"
+            try:
+                bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
+                self.processor.calculate_location_for_visualization(bluetooth_results)
+                self.processor.calculate_and_save_location(bluetooth_results)
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理第{index+1}条测试数据")
+            except Exception as e:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
+        else:
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试数据已全部处理完毕")
+            self.next_test_button.config(state="disabled")
+            self.next_test_button_viz.config(state="disabled")
+
+    def next_test_data(self):
+        if self.test_mode and self.test_data:
+            self.test_index += 1
+            if self.test_index < len(self.test_data):
+                self.process_test_data(self.test_index)
+            else:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试数据已全部处理完毕")
+                self.next_test_button.config(state="disabled")
+                self.next_test_button_viz.config(state="disabled")
+
     def pause_recording(self):
         """暂停数据记录"""
         if self.processor:
@@ -1683,8 +1754,7 @@ def main():
     processor.on_gui_message(gui.message_queue.put)  # 传递日志更新函数
 
     # 运行GUI
-    else :
-        gui.run()
+    gui.run()
 
 
 if __name__ == "__main__":
