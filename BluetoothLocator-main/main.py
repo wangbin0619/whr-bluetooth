@@ -384,7 +384,7 @@ class BeaconLocationCalculator:
 
         return [lat, lon]
 
-    def calculate_terminal_location(self, bluetooth_readings):
+    def calculate_terminal_location(self, bluetooth_readings, method="trilateration"):
         """
         根据蓝牙读数计算终端位置
         bluetooth_readings: [{"mac": "XX:XX:XX:XX:XX:XX", "rssi": -65}, ...]
@@ -446,10 +446,24 @@ class BeaconLocationCalculator:
                     "beacon_count": 2
                 }
         else:
-            # 三个或更多信标，使用三边测量
-            result = self.trilateration(beacon_positions, distances)
+            # 三个及以上信标，根据method参数选择算法
+            if method == "trilateration":
+                result = self.trilateration(beacon_positions, distances)
+                used_method = "trilateration"
+            elif method == "weighted_centroid":
+                result = self.weighted_centroid(beacon_positions, rssi_values)
+                used_method = "weighted_centroid"
+            elif method == "simple_centroid":
+                lat = sum(pos[0] for pos in beacon_positions) / len(beacon_positions)
+                lon = sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
+                result = [lat, lon]
+                used_method = "simple_centroid"
+            else:
+                # 默认三边测量
+                result = self.trilateration(beacon_positions, distances)
+                used_method = "trilateration"
+
             if result:
-                # 计算精度估计
                 accuracy = sum(distances) / len(distances)
                 return {
                     "status": "success",
@@ -457,16 +471,16 @@ class BeaconLocationCalculator:
                     "longitude": result[1],
                     "accuracy": accuracy,
                     "beacon_count": len(valid_readings),
-                    "method": "trilateration"
+                    "method": used_method
                 }
             else:
-                # 三边测量失败，使用加权质心作为备选
-                result = self.weighted_centroid(beacon_positions, rssi_values)
-                if result:
+                # 主方法失败，尝试加权质心作为备选
+                fallback = self.weighted_centroid(beacon_positions, rssi_values)
+                if fallback:
                     return {
                         "status": "fallback",
-                        "latitude": result[0],
-                        "longitude": result[1],
+                        "latitude": fallback[0],
+                        "longitude": fallback[1],
                         "accuracy": sum(distances) / len(distances),
                         "beacon_count": len(valid_readings),
                         "method": "weighted_centroid_fallback"
@@ -1067,6 +1081,9 @@ class DataMonitorGUI:
 
     def update_visualization(self):
         """更新可视化图形"""
+        if getattr(self, 'test_mode', False):
+            self.update_visualization_test_mode()
+            return
         if not self.processor:
             return
 
@@ -1152,6 +1169,70 @@ class DataMonitorGUI:
 
         except Exception as e:
             print(f"更新可视化时出错: {e}")
+
+    def update_visualization_test_mode(self):
+        """测试模式下的可视化，内容与正常模式一致，后续可自定义"""
+        # 目前内容与update_visualization一致
+        if not self.processor:
+            return
+        try:
+            self.ax.clear()
+            beacons = self.processor.location_calculator.get_all_beacons()
+            if beacons:
+                beacon_lons = [info['longitude'] for info in beacons.values()]
+                beacon_lats = [info['latitude'] for info in beacons.values()]
+                self.ax.scatter(beacon_lons, beacon_lats, c='blue', s=100, marker='^',
+                                label='信标位置', alpha=0.8, edgecolors='darkblue')
+                for mac, info in beacons.items():
+                    self.ax.annotate(mac[-4:], (info['longitude'], info['latitude']),
+                                     xytext=(5, 5), textcoords='offset points', fontsize=8)
+                colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+                all_lons = beacon_lons.copy()
+                all_lats = beacon_lats.copy()
+                color_index = 0
+                for device_id, device_history in self.location_history.items():
+                    if not device_history:
+                        continue
+                    color = colors[color_index % len(colors)]
+                    color_index += 1
+                    device_lons = [loc['longitude'] for loc in device_history]
+                    device_lats = [loc['latitude'] for loc in device_history]
+                    all_lons.extend(device_lons)
+                    all_lats.extend(device_lats)
+                    if len(device_lons) > 1:
+                        self.ax.plot(device_lons, device_lats, color=color,
+                                     alpha=0.6, linewidth=2, label=f'方法trilateration轨迹test')
+                        for idx, (lon, lat) in enumerate(zip(device_lons, device_lats), start=1):
+                            if idx % 2 == 0 and idx != len(device_lons):
+                                self.ax.annotate(f"{idx}", (lon, lat), xytext=(10, -10), textcoords='offset points', fontsize=10, color=color)
+                    if device_history:
+                        current = device_history[-1]
+                        self.ax.scatter([current['longitude']], [current['latitude']],
+                                        c=color, s=150, marker='o', 
+                                        alpha=0.9, edgecolors='black', linewidth=2)
+                        self.ax.annotate(f'设备{color_index}', 
+                                        (current['longitude'], current['latitude']),
+                                        xytext=(10, 10), textcoords='offset points', 
+                                        fontsize=10, fontweight='bold',
+                                        bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.7))
+                if all_lons and all_lats:
+                    lon_margin = (max(all_lons) - min(all_lons)) * 0.1 or 0.001
+                    lat_margin = (max(all_lats) - min(all_lats)) * 0.1 or 0.001
+                    self.ax.set_xlim(min(all_lons) - lon_margin,
+                                     max(all_lons) + lon_margin)
+                    self.ax.set_ylim(min(all_lats) - lat_margin,
+                                     max(all_lats) + lat_margin)
+            self.ax.set_title("蓝牙信标定位可视化")
+            self.ax.set_xlabel("经度")
+            self.ax.set_ylabel("纬度")
+            self.ax.ticklabel_format(style='plain', useOffset=False, axis='both')
+            self.ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
+            self.ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
+            self.ax.grid(True, alpha=0.3)
+            self.ax.legend()
+            self.canvas.draw()
+        except Exception as e:
+            print(f"测试模式下更新可视化时出错: {e}")
 
     def create_settings_tab(self):
         """创建设置选项卡"""
