@@ -850,6 +850,8 @@ class DataMonitorGUI:
 
         # 位置历史记录 - 支持多设备
         self.location_history = {}  # 改为字典，key为device_id
+        # 新增：多方法历史
+        self.location_history_method = {}  # {method: {device_id: [位置列表]}}
         
         # MQTT客户端管理
         self.mqtt_client = None
@@ -1171,8 +1173,7 @@ class DataMonitorGUI:
             print(f"更新可视化时出错: {e}")
 
     def update_visualization_test_mode(self):
-        """测试模式下的可视化，内容与正常模式一致，后续可自定义"""
-        # 目前内容与update_visualization一致
+        """测试模式下的可视化，支持多方法轨迹"""
         if not self.processor:
             return
         try:
@@ -1186,35 +1187,33 @@ class DataMonitorGUI:
                 for mac, info in beacons.items():
                     self.ax.annotate(mac[-4:], (info['longitude'], info['latitude']),
                                      xytext=(5, 5), textcoords='offset points', fontsize=8)
-                colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+                method_colors = {
+                    "trilateration": "red",
+                    "weighted_centroid": "green",
+                    "simple_centroid": "orange"
+                }
                 all_lons = beacon_lons.copy()
                 all_lats = beacon_lats.copy()
-                color_index = 0
-                for device_id, device_history in self.location_history.items():
-                    if not device_history:
-                        continue
-                    color = colors[color_index % len(colors)]
-                    color_index += 1
-                    device_lons = [loc['longitude'] for loc in device_history]
-                    device_lats = [loc['latitude'] for loc in device_history]
-                    all_lons.extend(device_lons)
-                    all_lats.extend(device_lats)
-                    if len(device_lons) > 1:
-                        self.ax.plot(device_lons, device_lats, color=color,
-                                     alpha=0.6, linewidth=2, label=f'方法trilateration轨迹')
-                        for idx, (lon, lat) in enumerate(zip(device_lons, device_lats), start=1):
-                            if idx % 2 == 0 and idx != len(device_lons):
-                                self.ax.annotate(f"{idx}", (lon, lat), xytext=(10, -10), textcoords='offset points', fontsize=10, color=color)
-                    if device_history:
-                        current = device_history[-1]
-                        self.ax.scatter([current['longitude']], [current['latitude']],
-                                        c=color, s=150, marker='o', 
-                                        alpha=0.9, edgecolors='black', linewidth=2)
-                        self.ax.annotate(f'设备{color_index}', 
-                                        (current['longitude'], current['latitude']),
-                                        xytext=(10, 10), textcoords='offset points', 
-                                        fontsize=10, fontweight='bold',
-                                        bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.7))
+                for method, device_dict in self.location_history_method.items():
+                    color = method_colors.get(method, "gray")
+                    for device_id, device_history in device_dict.items():
+                        device_lons = [loc['longitude'] for loc in device_history]
+                        device_lats = [loc['latitude'] for loc in device_history]
+                        all_lons.extend(device_lons)
+                        all_lats.extend(device_lats)
+                        if len(device_lons) > 1:
+                            self.ax.plot(device_lons, device_lats, color=color,
+                                         alpha=0.6, linewidth=2, label=f'方法{method}轨迹')
+                        if device_history:
+                            current = device_history[-1]
+                            self.ax.scatter([current['longitude']], [current['latitude']],
+                                            c=color, s=150, marker='o', 
+                                            alpha=0.9, edgecolors='black', linewidth=2)
+                            self.ax.annotate(f'{method}', 
+                                            (current['longitude'], current['latitude']),
+                                            xytext=(10, 10), textcoords='offset points', 
+                                            fontsize=10, fontweight='bold',
+                                            bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.7))
                 if all_lons and all_lats:
                     lon_margin = (max(all_lons) - min(all_lons)) * 0.1 or 0.001
                     lat_margin = (max(all_lats) - min(all_lats)) * 0.1 or 0.001
@@ -1222,7 +1221,7 @@ class DataMonitorGUI:
                                      max(all_lons) + lon_margin)
                     self.ax.set_ylim(min(all_lats) - lat_margin,
                                      max(all_lats) + lat_margin)
-            self.ax.set_title("蓝牙信标定位可视化")
+            self.ax.set_title("蓝牙信标定位可视化（多方法测试）")
             self.ax.set_xlabel("经度")
             self.ax.set_ylabel("纬度")
             self.ax.ticklabel_format(style='plain', useOffset=False, axis='both')
@@ -1697,9 +1696,26 @@ class DataMonitorGUI:
             data_str = ";".join(items) + f";{device_id}"
             try:
                 bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
-                self.processor.calculate_location_for_visualization(bluetooth_results)
-                self.processor.calculate_and_save_location(bluetooth_results)
-                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理第{index+1}条测试数据")
+                # 多方法处理
+                methods = ["trilateration", "weighted_centroid", "simple_centroid"]
+                for method in methods:
+                    location_result = self.processor.location_calculator.calculate_terminal_location(bluetooth_results, method=method)
+                    if location_result and location_result["status"] in ["success", "fallback"]:
+                        # 兼容无device_id情况
+                        dev_id = bluetooth_results[0]["device_id"] if bluetooth_results and "device_id" in bluetooth_results[0] else device_id
+                        if method not in self.location_history_method:
+                            self.location_history_method[method] = {}
+                        if dev_id not in self.location_history_method[method]:
+                            self.location_history_method[method][dev_id] = []
+                        self.location_history_method[method][dev_id].append({
+                            'longitude': location_result['longitude'],
+                            'latitude': location_result['latitude'],
+                            'timestamp': location_result.get('timestamp', ''),
+                            'accuracy': location_result['accuracy'],
+                            'method': location_result['method'],
+                            'device_id': dev_id
+                        })
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理第{index+1}条测试数据（多方法）")
             except Exception as e:
                 self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
         else:
