@@ -222,6 +222,13 @@ class BeaconLocationCalculator:
 
     def calculate_distance_improved(self, rssi):
         """改进的RSSI距离计算方法"""
+        # x=-y-49.8/3.57
+        r=-rssi - 49.8 / 3.57
+        if r < 0:
+            return 0.1
+        else  :
+            return r
+        '''
         if rssi >= -50:
             return 0.5  # 很近
         elif rssi >= -70:
@@ -230,6 +237,7 @@ class BeaconLocationCalculator:
             return 5.0 + ((-70 - rssi) / 20) * 10  # 5-15米
         else:
             return 15.0 + ((-90 - rssi) / 10) * 5  # 15米以上
+        '''
 
     def haversine_distance(self, lat1, lon1, lat2, lon2):
         """计算两个经纬度点之间的距离（米）"""
@@ -267,11 +275,14 @@ class BeaconLocationCalculator:
                 total_error += error
             return total_error
 
-        # 使用质心作为初始猜测
-        initial_lat = sum(pos[0]
-                          for pos in beacon_positions) / len(beacon_positions)
-        initial_lon = sum(pos[1]
-                          for pos in beacon_positions) / len(beacon_positions)
+        # 初始猜测：有历史则用上一次结果，否则用质心
+        if self.location_history and isinstance(self.location_history, list) and len(self.location_history) > 0:
+            last_location = self.location_history[-1]
+            initial_lat = last_location[0]
+            initial_lon = last_location[1]
+        else:
+            initial_lat = sum(pos[0] for pos in beacon_positions) / len(beacon_positions)
+            initial_lon = sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
 
         try:
             # 使用改进的梯度下降方法
@@ -308,51 +319,45 @@ class BeaconLocationCalculator:
             print(f"三边测量计算失败: {e}")
             return None
 
-    def simple_minimize(self, func, initial_point, learning_rate=0.0001, max_iterations=1000, tolerance=1e-8):
-        """改进的梯度下降优化算法"""
+    def simple_minimize(self, func, initial_point, learning_rate=0.1, max_iterations=1000, tolerance=1e-8):
+        """改进的梯度下降优化算法，输出过程信息"""
         x = list(initial_point)
         best_x = list(x)
         best_value = func(x)
+        print(f"[梯度下降] 初始点: {x}, 初始误差: {best_value:.6f}")
 
         for iteration in range(max_iterations):
-            # 计算数值梯度
-            epsilon = 1e-8
+            epsilon = 1e-5
             gradient = []
-
             for i in range(len(x)):
                 x_plus = x.copy()
                 x_minus = x.copy()
                 x_plus[i] += epsilon
                 x_minus[i] -= epsilon
-
                 grad = (func(x_plus) - func(x_minus)) / (2 * epsilon)
                 gradient.append(grad)
 
-            # 计算梯度的模长
             grad_norm = sum(g*g for g in gradient) ** 0.5
+            # 输出每步信息
+            print(f"[迭代{iteration}] x: {x}, 误差: {best_value:.6f}, 梯度: {gradient}, 梯度模长: {grad_norm:.6e}, 学习率: {learning_rate:.6e}")
 
-            # 如果梯度很小，说明已经收敛
             if grad_norm < tolerance:
+                print(f"[收敛] 梯度模长<{tolerance}, 迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
                 break
 
-            # 自适应学习率
             current_lr = learning_rate / (1 + iteration * 0.001)
-
-            # 更新参数
-            new_x = []
-            for i in range(len(x)):
-                new_x.append(x[i] - current_lr * gradient[i])
-
-            # 检查新位置是否更好
+            new_x = [x[i] - current_lr * gradient[i] for i in range(len(x))]
             new_value = func(new_x)
+            # 检查新位置是否更好
             if new_value < best_value:
                 best_value = new_value
                 best_x = list(new_x)
                 x = new_x
             else:
-                # 如果没有改善，减小学习率
                 learning_rate *= 0.5
+                print(f"[学习率调整] 新点误差未改善，学习率减半为{learning_rate:.6e}")
                 if learning_rate < 1e-10:
+                    print(f"[终止] 学习率过小，迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
                     break
 
         return best_x
@@ -490,6 +495,9 @@ class BeaconLocationCalculator:
             elif method == "weighted_centroid":
                 result = self.weighted_centroid(beacon_positions, rssi_values)
                 used_method = "weighted_centroid"
+            elif method == "normal_trilateral":
+                result = self.normal_trilateral(beacon_positions, distances)
+                used_method = "normal_trilateral"
             elif method == "simple_centroid":
                 lat = sum(pos[0] for pos in beacon_positions) / len(beacon_positions)
                 lon = sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
@@ -499,7 +507,7 @@ class BeaconLocationCalculator:
                 # 默认三边测量
                 result = self.trilateration(beacon_positions, distances)
                 used_method = "trilateration"
-
+                print(f"使用默认方法: {used_method}")
             if result:
                 accuracy = sum(distances) / len(distances)
                 return {
@@ -854,7 +862,7 @@ class MQTTDataProcessor:
             print(f"本地蓝牙数据文件不存在：{file_path}")
             return
         try:
-            df = pd.read_excel(file_path,sheet_name="蓝牙数据")
+            df = pd.read_excel(file_path,sheet_name="bluetooth_position_data")
             grouped = df.groupby(['device_id','timestamp','id'])
             for (device_id, timestamp,id), group in grouped:
                 # 组装成和 handle_bluetooth_position_data 一样的格式
@@ -1652,31 +1660,59 @@ class DataMonitorGUI:
         self.alt_entry.delete(0, tk.END)
 
     def import_local_bluetooth_file(self):
+        import json
         file_path = filedialog.askopenfilename(
             title="选择本地蓝牙数据Excel文件",
             filetypes=[("Excel文件", "*.xlsx *.xls")]
         )
         if not file_path:
             return
+        # 保存路径到json文件
+        try:
+            with open("bluetooth_data_path.json", "w", encoding="utf-8") as f:
+                json.dump({"path": file_path}, f)
+        except Exception as e:
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 保存路径失败: {e}")
         self.processor.process_local_bluetooth_file(file_path)
         self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已导入本地蓝牙数据文件: {file_path}")
 
     def use_default_local_bluetooth_file(self):
-        """直接处理默认本地蓝牙数据文件（如data.xlsx）"""
-        default_file = "data.xlsx"
-        self.processor.process_local_bluetooth_file(default_file)
-        self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理默认本地蓝牙数据文件: {default_file}")
+        """优先使用json文件中的路径，否则使用默认本地蓝牙数据文件（如data.xlsx）"""
+        import json
+        import os
+        json_path = "bluetooth_data_path.json"
+        file_path = "data.xlsx"
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "path" in data and os.path.exists(data["path"]):
+                        file_path = data["path"]
+            except Exception as e:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取路径json失败: {e}")
+        self.processor.process_local_bluetooth_file(file_path)
+        self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理本地蓝牙数据文件: {file_path}")
 
     def test_first_timestamp_local_bluetooth_file(self):
-        """只处理本地默认蓝牙数据文件的第一个时间戳的数据"""
+        """只处理本地蓝牙数据文件（优先json路径）第一个时间戳的数据"""
         import pandas as pd
         import os
-        default_file = "data.xlsx"
-        if not os.path.exists(default_file):
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 默认本地蓝牙数据文件不存在: {default_file}")
+        import json
+        json_path = "bluetooth_data_path.json"
+        file_path = "data.xlsx"
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "path" in data and os.path.exists(data["path"]):
+                        file_path = data["path"]
+            except Exception as e:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取路径json失败: {e}")
+        if not os.path.exists(file_path):
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 本地蓝牙数据文件不存在: {file_path}")
             return
         try:
-            df = pd.read_excel(default_file, sheet_name="蓝牙数据")
+            df = pd.read_excel(file_path, sheet_name="bluetooth_position_data")
             grouped = df.groupby(['device_id', 'timestamp'])
             # 只取第一个分组
             for (device_id, timestamp), group in grouped:
@@ -1692,24 +1728,34 @@ class DataMonitorGUI:
                 except Exception as e:
                     self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
                 break  # 只处理第一个分组
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已测试处理默认本地蓝牙数据文件的第一个时间戳: {default_file}")
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已测试处理本地蓝牙数据文件的第一个时间戳: {file_path}")
         except Exception as e:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
 
     def start_test_mode(self):
-        import pandas as pd
+        import json
         import os
-        default_file = "data.xlsx"
+        file_path = "data.xlsx"
+        json_path = "bluetooth_data_path.json"
         self.test_data = []
         self.test_index = 0
         self.test_mode = True
-        if not os.path.exists(default_file):
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 默认本地蓝牙数据文件不存在: {default_file}")
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "path" in data and os.path.exists(data["path"]):
+                        file_path = data["path"]
+            except Exception as e:
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取路径json失败: {e}")
+        if not os.path.exists(file_path):
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 本地蓝牙数据文件不存在: {file_path}")
             self.next_test_button.config(state="disabled")
             self.next_test_button_viz.config(state="disabled")
             return
         try:
-            df = pd.read_excel(default_file, sheet_name="蓝牙数据")
+            import pandas as pd
+            df = pd.read_excel(file_path, sheet_name="bluetooth_position_data")
             grouped = df.groupby(['device_id', 'timestamp', 'id'])
             for key, group in grouped:
                 self.test_data.append((key, group))
@@ -1737,7 +1783,8 @@ class DataMonitorGUI:
             try:
                 bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
                 # 多方法处理
-                methods = ["trilateration", "weighted_centroid", "simple_centroid",'normal_trilateral']
+                methods = ["trilateration"]
+                #methods = ["trilateration", "weighted_centroid", "simple_centroid",'normal_trilateral']
                 for method in methods:
                     location_result = self.processor.location_calculator.calculate_terminal_location(bluetooth_results, method=method)
                     if location_result and location_result["status"] in ["success", "fallback"]:
