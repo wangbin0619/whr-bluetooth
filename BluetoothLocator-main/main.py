@@ -223,7 +223,7 @@ class BeaconLocationCalculator:
     def calculate_distance_improved(self, rssi):
         """改进的RSSI距离计算方法"""
         # x=-y-49.8/3.57
-        r=-rssi - 49.8 / 3.57
+        r=(-rssi - 49.8)/ 3.57
         if r < 0:
             return 0.1
         else  :
@@ -255,7 +255,7 @@ class BeaconLocationCalculator:
 
         return R * c
 
-    def trilateration(self, beacon_positions, distances):
+    def trilateration(self, beacon_positions, distances,test_flag=False):
         """
         三边测量算法计算位置
         beacon_positions: [(lat1, lon1), (lat2, lon2), (lat3, lon3), ...]
@@ -265,14 +265,17 @@ class BeaconLocationCalculator:
             return None
 
         def error_function(point):
-            """计算误差函数"""
+            """计算误差函数，增加详细打印"""
             lat, lon = point
             total_error = 0
             for i, (beacon_lat, beacon_lon) in enumerate(beacon_positions):
                 calculated_distance = self.haversine_distance(
                     lat, lon, beacon_lat, beacon_lon)
-                error = (calculated_distance - distances[i]) ** 2
+                error = abs((calculated_distance - distances[i]))
+                if test_flag == True:
+                    print(f"[误差调试] 信标{i}: 目标点({lat:.6f},{lon:.6f}), 信标({beacon_lat:.6f},{beacon_lon:.6f}), 计算距离={calculated_distance:.3f}, 期望距离={distances[i]:.3f}, 误差={error:.3f}")
                 total_error += error
+            print(f"[误差调试] 总误差: {total_error:.3f}")
             return total_error
 
         # 初始猜测：有历史则用上一次结果，否则用质心
@@ -319,7 +322,7 @@ class BeaconLocationCalculator:
             print(f"三边测量计算失败: {e}")
             return None
 
-    def simple_minimize(self, func, initial_point, learning_rate=0.1, max_iterations=1000, tolerance=1e-8):
+    def simple_minimize(self, func, initial_point, learning_rate=1e-10, max_iterations=1000, tolerance=1e-8):
         """改进的梯度下降优化算法，输出过程信息"""
         x = list(initial_point)
         best_x = list(x)
