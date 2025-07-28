@@ -31,7 +31,7 @@ def calculate_n(rssi, distance, rssi0=-56.9, d0=1):
 def main():
     # 读取Excel文件
     try:
-        df = pd.read_excel('./rssi_filtered.xlsx')
+        df = pd.read_excel('./data/rssi_filtered.xlsx')
     except FileNotFoundError:
         print("错误：找不到文件rssi_filtered.xlsx，请确保文件在正确的路径下。")
         return

@@ -1,0 +1,7 @@
+mqtt:
+  ip: localhost
+  port: 1883
+  topic: /device/blueTooth/station/+
+rssi_model:
+  path_loss_exponent: 2.0
+  tx_power: -59

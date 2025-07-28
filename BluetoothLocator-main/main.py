@@ -24,7 +24,7 @@ plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 class ConfigManager:
     """配置管理类，负责读写YAML配置文件"""
     
-    def __init__(self, config_file="config.yaml"):
+    def __init__(self, config_file="./config/config.yaml"):
         self.config_file = config_file
         self.default_config = {
             "mqtt": {
@@ -115,7 +115,7 @@ class BeaconLocationCalculator:
         self.path_loss_exponent = rssi_config["path_loss_exponent"]  # 路径损失指数
         # 定位历史记录
         self.location_history = []
-        self.location_csv_path = "terminal_locations.csv"
+        self.location_csv_path = "./output/terminal_locations.csv"
         self.init_location_csv()
     
     def update_rssi_model_params(self, tx_power, path_loss_exponent):
@@ -133,7 +133,7 @@ class BeaconLocationCalculator:
             ])
             location_df.to_csv(self.location_csv_path, index=False)
 
-    def load_beacon_database(self, beacon_file_path="beacon_database.json"):
+    def load_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
         """加载蓝牙信标位置数据库"""
         try:
             if os.path.exists(beacon_file_path):
@@ -146,7 +146,7 @@ class BeaconLocationCalculator:
             print(f"加载信标数据库失败: {e}")
             self.create_sample_beacon_database(beacon_file_path)
 
-    def create_sample_beacon_database(self, beacon_file_path="beacon_database.json"):
+    def create_sample_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
         """创建示例信标数据库"""
         sample_beacons = {
             "EXAMPLE-BEACON": {"longitude": 120, "latitude": 31, "altitude": 0.0},
@@ -191,7 +191,7 @@ class BeaconLocationCalculator:
         """获取所有信标信息"""
         return dict(self.beacon_database)
 
-    def save_beacon_database(self, beacon_file_path="beacon_database.json"):
+    def save_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
         """保存信标数据库到文件"""
         try:
             with open(beacon_file_path, 'w', encoding='utf-8') as f:
@@ -200,26 +200,23 @@ class BeaconLocationCalculator:
         except Exception as e:
             print(f"保存信标数据库失败: {e}")
 
-    def rssi_to_distance(self, rssi, tx_power=None, path_loss_exponent=None):
+    def rssi_to_distance(self, rssi, tx_power=-54.24, path_loss_exponent=2.76):
         """
         基于RSSI计算距离 (单位: 米)
         使用路径损失模型: RSSI = TxPower - 10 * n * log10(d)
+        距离测试拟合结果：-54.24,2.76
         """
         if tx_power is None:
             tx_power = self.tx_power
         if path_loss_exponent is None:
             path_loss_exponent = self.path_loss_exponent
-
         if rssi == 0:
             return -1.0
-
-        ratio = tx_power * 1.0 / rssi
-        if ratio < 1.0:
-            return math.pow(ratio, 10)
-        else:
-            accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
-            return accuracy
-
+        exponent = (tx_power - rssi) / (10.0 * path_loss_exponent)
+        distance = math.pow(10, exponent)
+        return distance
+    def calculate_n(self):
+        return 
     def calculate_distance_improved(self, rssi):
         """改进的RSSI距离计算方法"""
         # x=-y-49.8/3.57
@@ -263,19 +260,40 @@ class BeaconLocationCalculator:
         """
         if len(beacon_positions) < 3:
             return None
-
+        
+        if test_flag:
+            print("\n" + "="*60)
+            print("🔍 三边测量算法开始")
+            print("="*60)
+            print("📍 信标位置和期望距离:")
+            for i, ((beacon_lat, beacon_lon), distance) in enumerate(zip(beacon_positions, distances)):
+                print(f"   信标{i+1}: 位置({beacon_lat:.6f}, {beacon_lon:.6f}), 期望距离: {distance:.3f}m")
+        
         def error_function(point):
             """计算误差函数，增加详细打印"""
             lat, lon = point
             total_error = 0
+            individual_errors = []
+            
+            if test_flag:
+                print(f"\n📐 当前测试点: ({lat:.6f}, {lon:.6f})")
+                print("   各信标距离计算:")
+            
             for i, (beacon_lat, beacon_lon) in enumerate(beacon_positions):
                 calculated_distance = self.haversine_distance(
                     lat, lon, beacon_lat, beacon_lon)
-                error = abs((calculated_distance - distances[i]))
-                if test_flag == True:
-                    print(f"[误差调试] 信标{i}: 目标点({lat:.6f},{lon:.6f}), 信标({beacon_lat:.6f},{beacon_lon:.6f}), 计算距离={calculated_distance:.3f}, 期望距离={distances[i]:.3f}, 误差={error:.3f}")
+                distance_diff = calculated_distance - distances[i]
+                error = distance_diff ** 2
+                individual_errors.append(error)
                 total_error += error
-            print(f"[误差调试] 总误差: {total_error:.3f}")
+                
+                if test_flag:
+                    print(f"   信标{i+1}: 计算距离={calculated_distance:.3f}m, 期望距离={distances[i]:.3f}m, "
+                          f"差值={distance_diff:+.3f}m, 误差²={error:.6f}")
+            
+            if test_flag:
+                print(f"   ⚡ 总误差: {total_error:.6f}")
+            
             return total_error
 
         # 初始猜测：有历史则用上一次结果，否则用质心
@@ -283,9 +301,13 @@ class BeaconLocationCalculator:
             last_location = self.location_history[-1]
             initial_lat = last_location[0]
             initial_lon = last_location[1]
+            if test_flag:
+                print(f"\n初始点(历史位置): ({initial_lat:.6f}, {initial_lon:.6f})")
         else:
             initial_lat = sum(pos[0] for pos in beacon_positions) / len(beacon_positions)
             initial_lon = sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
+            if test_flag:
+                print(f"\n初始点(信标质心): ({initial_lat:.6f}, {initial_lon:.6f})")
 
         try:
             # 使用改进的梯度下降方法
@@ -322,7 +344,7 @@ class BeaconLocationCalculator:
             print(f"三边测量计算失败: {e}")
             return None
 
-    def simple_minimize(self, func, initial_point, learning_rate=1e-10, max_iterations=1000, tolerance=1e-8):
+    def simple_minimize(self, func, initial_point,epsilon=1e-5, learning_rate=1e-10, max_iterations=1000, tolerance=1e-8,test_flag=False):
         """改进的梯度下降优化算法，输出过程信息"""
         x = list(initial_point)
         best_x = list(x)
@@ -330,7 +352,6 @@ class BeaconLocationCalculator:
         print(f"[梯度下降] 初始点: {x}, 初始误差: {best_value:.6f}")
 
         for iteration in range(max_iterations):
-            epsilon = 1e-5
             gradient = []
             for i in range(len(x)):
                 x_plus = x.copy()
@@ -342,7 +363,8 @@ class BeaconLocationCalculator:
 
             grad_norm = sum(g*g for g in gradient) ** 0.5
             # 输出每步信息
-            print(f"[迭代{iteration}] x: {x}, 误差: {best_value:.6f}, 梯度: {gradient}, 梯度模长: {grad_norm:.6e}, 学习率: {learning_rate:.6e}")
+            if test_flag == True: 
+                print(f"[迭代{iteration}] x: {x}, 误差: {best_value:.6f}, 梯度: {gradient}, 梯度模长: {grad_norm:.6e}, 学习率: {learning_rate:.6e}")
 
             if grad_norm < tolerance:
                 print(f"[收敛] 梯度模长<{tolerance}, 迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
@@ -358,8 +380,9 @@ class BeaconLocationCalculator:
                 x = new_x
             else:
                 learning_rate *= 0.5
-                print(f"[学习率调整] 新点误差未改善，学习率减半为{learning_rate:.6e}")
-                if learning_rate < 1e-10:
+                if test_flag == True:
+                    print(f"[学习率调整] 新点误差未改善，学习率减半为{learning_rate:.6e}")
+                if learning_rate < 1e-13:
                     print(f"[终止] 学习率过小，迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
                     break
 
@@ -452,7 +475,7 @@ class BeaconLocationCalculator:
                 valid_readings.append(reading)
                 beacon_positions.append(
                     [beacon_info["latitude"], beacon_info["longitude"]])
-                distances.append(self.calculate_distance_improved(rssi))
+                distances.append(self.rssi_to_distance(rssi))
                 rssi_values.append(rssi)
 
         if len(valid_readings) == 0:
@@ -493,7 +516,7 @@ class BeaconLocationCalculator:
         else:
             # 三个及以上信标，根据method参数选择算法
             if method == "trilateration":
-                result = self.trilateration(beacon_positions, distances)
+                result = self.trilateration(beacon_positions, distances,test_flag=False)
                 used_method = "trilateration"
             elif method == "weighted_centroid":
                 result = self.weighted_centroid(beacon_positions, rssi_values)
@@ -559,7 +582,7 @@ class MQTTDataProcessor:
         self.current_topic = None
 
         # 确保CSV文件存在
-        self.bluetooth_csv_path = "bluetooth_position_data.csv"
+        self.bluetooth_csv_path = "./other_data/bluetooth_position_data.csv"
 
         # 初始化定位计算器
         self.location_calculator = BeaconLocationCalculator(self.config_manager)
@@ -1674,6 +1697,7 @@ class DataMonitorGUI:
         try:
             with open("bluetooth_data_path.json", "w", encoding="utf-8") as f:
                 json.dump({"path": file_path}, f)
+                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 保存路径成功")
         except Exception as e:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 保存路径失败: {e}")
         self.processor.process_local_bluetooth_file(file_path)
@@ -1683,7 +1707,7 @@ class DataMonitorGUI:
         """优先使用json文件中的路径，否则使用默认本地蓝牙数据文件（如data.xlsx）"""
         import json
         import os
-        json_path = "bluetooth_data_path.json"
+        json_path = "./config/bluetooth_data_path.json"
         file_path = "data.xlsx"
         if os.path.exists(json_path):
             try:
@@ -1701,7 +1725,7 @@ class DataMonitorGUI:
         import pandas as pd
         import os
         import json
-        json_path = "bluetooth_data_path.json"
+        json_path = "./config/bluetooth_data_path.json"
         file_path = "data.xlsx"
         if os.path.exists(json_path):
             try:
@@ -1739,7 +1763,7 @@ class DataMonitorGUI:
         import json
         import os
         file_path = "data.xlsx"
-        json_path = "bluetooth_data_path.json"
+        json_path = "./config/bluetooth_data_path.json"
         self.test_data = []
         self.test_index = 0
         self.test_mode = True
