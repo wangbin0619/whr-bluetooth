@@ -1,0 +1,32 @@
+{
+  "000000000AB9": {
+    "longitude": 120.3723008,
+    "latitude": 31.5679858,
+    "altitude": 0.0
+  },
+  "00000000024A": {
+    "longitude": 120.3722214,
+    "latitude": 31.5679636 ,
+    "altitude": 0.0
+  },
+  "0000000002AD": {
+    "longitude": 120.3721408,
+    "latitude": 31.5679446,
+    "altitude": 0.0
+  },
+  "00000000093C": {
+    "longitude": 120.3721659,
+    "latitude": 31.5678734,
+    "altitude": 0.0
+  },
+  "000000000842": {
+    "longitude": 120.3722483,
+    "latitude": 31.5678957,
+    "altitude": 0.0
+  },
+  "000000000498": {
+    "longitude": 120.3723296,
+    "latitude": 31.5679159 ,
+    "altitude": 0.0
+  }
+}

@@ -15,11 +15,16 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from tkinter import filedialog
 import numpy as np
+from scipy.optimize import minimize
 
 
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
+
+BEACON_DB_PATH = "./beacon/beacon_database.json"
+LOCATION_CSV_PATH = "./output/terminal_locations.csv"
+DATA_PATH_JSON_PATH = "./config/bluetooth_data.json"
 
 class ConfigManager:
     """配置管理类，负责读写YAML配置文件"""
@@ -137,7 +142,7 @@ class BeaconLocationCalculator:
         self.path_loss_exponent = rssi_config["path_loss_exponent"]  # 路径损失指数
         # 定位历史记录
         self.location_history = []
-        self.location_csv_path = "./output/terminal_locations.csv"
+        self.location_csv_path = LOCATION_CSV_PATH
         self.init_location_csv()
     
     def update_rssi_model_params(self, tx_power, path_loss_exponent):
@@ -155,7 +160,7 @@ class BeaconLocationCalculator:
             ])
             location_df.to_csv(self.location_csv_path, index=False)
 
-    def load_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
+    def load_beacon_database(self, beacon_file_path=BEACON_DB_PATH):
         """加载蓝牙信标位置数据库"""
         try:
             if os.path.exists(beacon_file_path):
@@ -168,7 +173,7 @@ class BeaconLocationCalculator:
             print(f"加载信标数据库失败: {e}")
             self.create_sample_beacon_database(beacon_file_path)
 
-    def create_sample_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
+    def create_sample_beacon_database(self, beacon_file_path=BEACON_DB_PATH):
         """创建示例信标数据库"""
         sample_beacons = {
             "EXAMPLE-BEACON": {"longitude": 120, "latitude": 31, "altitude": 0.0},
@@ -213,7 +218,7 @@ class BeaconLocationCalculator:
         """获取所有信标信息"""
         return dict(self.beacon_database)
 
-    def save_beacon_database(self, beacon_file_path="./beacon/beacon_database.json"):
+    def save_beacon_database(self, beacon_file_path=BEACON_DB_PATH):
         """保存信标数据库到文件"""
         try:
             with open(beacon_file_path, 'w', encoding='utf-8') as f:
@@ -222,44 +227,22 @@ class BeaconLocationCalculator:
         except Exception as e:
             print(f"保存信标数据库失败: {e}")
 
-    def rssi_to_distance(self, rssi, tx_power=-53.97, path_loss_exponent=2.36):
+    def rssi_to_distance(self, rssi, method="default", tx_power=-53.97, path_loss_exponent=2.36):
         """
         基于RSSI计算距离 (单位: 米)
-        使用路径损失模型: RSSI = TxPower - 10 * n * log10(d)
-        距离测试拟合结果：-54.24,2.76
-        拟合2 53.97 2.36
+        method: "default" 使用路径损失模型，"improved" 使用线性拟合模型
         """
-        if tx_power is None:
-            tx_power = self.tx_power
-        if path_loss_exponent is None:
-            path_loss_exponent = self.path_loss_exponent
-        self.tx_power = tx_power
-        self.path_loss_exponent = path_loss_exponent
+        if method == "improved":
+            r = (-rssi - 49.8) / 3.57
+            return max(r, 0.1)
+        # 默认模型
+        tx_power = tx_power if tx_power is not None else self.tx_power
+        path_loss_exponent = path_loss_exponent if path_loss_exponent is not None else self.path_loss_exponent
         if rssi == 0:
             return -1.0
         exponent = (tx_power - rssi) / (10.0 * path_loss_exponent)
         distance = math.pow(10, exponent)
         return distance
-    def calculate_n(self):
-        return 
-    def calculate_distance_improved(self, rssi):
-        """改进的RSSI距离计算方法"""
-        # x=-y-49.8/3.57
-        r=(-rssi - 49.8)/ 3.57
-        if r < 0:
-            return 0.1
-        else  :
-            return r
-        '''
-        if rssi >= -50:
-            return 0.5  # 很近
-        elif rssi >= -70:
-            return 1.0 + ((-50 - rssi) / 20) * 4  # 1-5米
-        elif rssi >= -90:
-            return 5.0 + ((-70 - rssi) / 20) * 10  # 5-15米
-        else:
-            return 15.0 + ((-90 - rssi) / 10) * 5  # 15米以上
-        '''
 
     def haversine_distance(self, lat1, lon1, lat2, lon2):
         """计算两个经纬度点之间的距离（米）"""
@@ -277,7 +260,7 @@ class BeaconLocationCalculator:
 
         return R * c
 
-    def trilateration(self, beacon_positions, distances, last_location=None, test_flag=False):
+    def trilateration(self, beacon_positions, distances, last_location=None, test_flag=False,rssi_values=None):
         """
         梯度下降测量算法计算位置
         beacon_positions: [(lat1, lon1), (lat2, lon2), (lat3, lon3), ...]
@@ -465,7 +448,8 @@ class BeaconLocationCalculator:
         
         for i, initial_point in enumerate(initial_points):
             try:
-                print(f"\n--- 初始点 {i+1}/{len(initial_points)} ---")
+                if test_flag:
+                    print(f"\n--- 初始点 {i+1}/{len(initial_points)} ---")
                 result = self.simple_minimize(
                     func, initial_point, epsilon, learning_rate, 
                     max_iterations, tolerance, test_flag)
@@ -505,7 +489,8 @@ class BeaconLocationCalculator:
         x = list(initial_point)
         best_x = list(x)
         best_value = func(x)
-        print(f"[梯度下降] 初始点: {x}, 初始误差: {best_value:.6f}")
+        if test_flag:
+            print(f"[梯度下降] 初始点: {x}, 初始误差: {best_value:.6f}")
 
         for iteration in range(max_iterations):
             gradient = []
@@ -538,12 +523,94 @@ class BeaconLocationCalculator:
                 learning_rate *= 0.5
                 if test_flag == True:
                     print(f"[学习率调整] 新点误差未改善，学习率减半为{learning_rate:.6e}")
-                if learning_rate < 1e-13:
-                    print(f"[终止] 学习率过小，迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
-                    break
+                    if learning_rate < 1e-13:
+                        print(f"[终止] 学习率过小，迭代终止。最终点: {best_x}, 误差: {best_value:.6f}")
+                        break
 
         return best_x
+    
+    def scipy_trilateration(self, beacon_positions, distances, last_location=None, test_flag=False):
+        """
+        使用scipy.optimize.minimize进行梯度下降定位，详细输出调试信息
+        beacon_positions: [(lat1, lon1), (lat2, lon2), ...]
+        distances: [d1, d2, ...]
+        """
+        import numpy as np
+        from scipy.optimize import minimize
+        if len(beacon_positions) < 3:
+            print("[scipy_trilateration] 信标数量不足3个，无法定位")
+            return None
+        step_log = []
+        def error_function(point):
+            lat, lon = point
+            total_error = 0
+            details = []
+            for i, (beacon_lat, beacon_lon) in enumerate(beacon_positions):
+                calculated_distance = self.haversine_distance(lat, lon, beacon_lat, beacon_lon)
+                distance_diff = calculated_distance - distances[i]
+                n = self.path_loss_exponent
+                weight = abs(10 * n / (distances[i] * np.log(10)) if calculated_distance > 0 else 0)
+                error = (distance_diff ** 2) * weight
+                total_error += error
+                details.append(f"  信标{i+1}: 计算距离={calculated_distance:.3f}m, 期望={distances[i]:.3f}m, 差值={distance_diff:+.3f}m, 误差={error:.6f}")
+            # 记录每步
+            step_log.append({
+                'point': (lat, lon),
+                'loss': total_error,
+                'details': details.copy()
+            })
+            return total_error
 
+        # 初始点
+        if last_location is not None:
+            initial_point = np.array(last_location)
+        else:
+            initial_point = np.array([
+                sum(pos[0] for pos in beacon_positions) / len(beacon_positions),
+                sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
+            ])
+        print(f"[scipy_trilateration] 初始点: {initial_point}")
+
+        # 调用scipy.optimize.minimize，增加callback输出
+        def callback(xk):
+            print(f"  [BFGS迭代] 当前点: ({xk[0]:.6f}, {xk[1]:.6f})，当前loss: {error_function(xk):.6f}")
+        try:
+            #minimize
+            res = minimize(error_function, initial_point, method='L-BFGS-B', callback=callback, options={'disp': True, 'maxiter': 200})
+        except Exception as e:
+            print(f"[scipy_trilateration] minimize异常: {e}")
+            for step in step_log[-5:]:
+                print(f"  [异常前步] 点: {step['point']}, loss: {step['loss']:.6f}")
+                for d in step['details']:
+                    print(d)
+            return None
+
+        print(f"[scipy_trilateration] 优化结束，success={res.success}, message={res.message}")
+        if not res.success:
+            print(f"[scipy_trilateration] 优化失败，最后loss: {res.fun:.6f}")
+            for step in step_log[-5:]:
+                print(f"  [失败前步] 点: {step['point']}, loss: {step['loss']:.6f}")
+                for d in step['details']:
+                    print(d)
+            return None
+
+        result_lat, result_lon = res.x
+        print(f"[scipy_trilateration] 最终结果: ({result_lat:.6f}, {result_lon:.6f}), loss: {res.fun:.6f}")
+        # 合理性检查
+        max_distance_to_beacons = 0
+        for beacon_lat, beacon_lon in beacon_positions:
+            dist = self.haversine_distance(result_lat, result_lon, beacon_lat, beacon_lon)
+            max_distance_to_beacons = max(max_distance_to_beacons, dist)
+        if max_distance_to_beacons > 1000:
+            print(f"[scipy_trilateration] 结果不合理，距离信标过远: {max_distance_to_beacons:.1f}米")
+            return None
+        if not (-90 <= result_lat <= 90) or not (-180 <= result_lon <= 180):
+            print(f"[scipy_trilateration] 结果超出地理坐标范围: ({result_lat}, {result_lon})")
+            return None
+        if test_flag:
+            print(f"[scipy_trilateration] 优化结果: ({result_lat:.6f}, {result_lon:.6f}), 优化误差: {res.fun:.6f}")
+        return [result_lat, result_lon]
+        
     def weighted_centroid(self, beacon_positions, rssi_values):
         """基于RSSI权重的质心算法"""
         if not beacon_positions:
@@ -608,7 +675,7 @@ class BeaconLocationCalculator:
             print(f"trilateral线性解算失败: {e}")
             return None
 
-    def calculate_terminal_location(self, bluetooth_readings, method="trilateration"):
+    def calculate_terminal_location(self, bluetooth_readings, method="scipy_trilateration"):
         """
         根据蓝牙读数计算终端位置
         bluetooth_readings: [{"mac": "XX:XX:XX:XX:XX:XX", "rssi": -65}, ...]
@@ -631,7 +698,8 @@ class BeaconLocationCalculator:
                 valid_readings.append(reading)
                 beacon_positions.append(
                     [beacon_info["latitude"], beacon_info["longitude"]])
-                distances.append(self.calculate_distance_improved(rssi))
+                #distance_method:
+                distances.append(self.rssi_to_distance(rssi))
                 rssi_values.append(rssi)
 
         if len(valid_readings) == 0:
@@ -677,10 +745,17 @@ class BeaconLocationCalculator:
                 if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
                     last_location = self.location_history[-1]
                 result = self.trilateration(beacon_positions, distances, last_location, test_flag=False)
-                used_method = "trilateration"
+                used_method = "trilateration"#test
+            elif method == "scipy_trilateration":
+                last_location = None
+                if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
+                    last_location = self.location_history[-1]
+                result = self.scipy_trilateration(beacon_positions, distances, last_location, test_flag=False)
+                used_method = "scipy_trilateration"
             elif method == "weighted_centroid":
                 result = self.weighted_centroid(beacon_positions, rssi_values)
                 used_method = "weighted_centroid"
+            
             elif method == "normal_trilateral":
                 result = self.normal_trilateral(beacon_positions, distances)
                 used_method = "normal_trilateral"
@@ -726,7 +801,6 @@ class BeaconLocationCalculator:
                         "message": "所有定位方法都失败",
                         "beacon_count": len(valid_readings)
                     }
-
 
 class MQTTDataProcessor:
     def __init__(self, config_manager=None):
@@ -1073,8 +1147,6 @@ class MQTTDataProcessor:
         except Exception as e:
             print(f"读取Excel文件失败: {e}")
             
-
-
 class DataMonitorGUI:
     def __init__(self, processor: MQTTDataProcessor, config_manager: ConfigManager):
         self.processor = processor
@@ -1085,10 +1157,10 @@ class DataMonitorGUI:
         self.root.geometry("1200x800")
 
         # 位置历史记录 - 支持多设备
-        self.location_history = {}  # 改为字典，key为device_id
+        self.location_history = {}  # key为device_id
         # 新增：多方法历史
         self.location_history_method = {}  # {method: {device_id: [位置列表]}}
-        
+
         # MQTT客户端管理
         self.mqtt_client = None
         self.mqtt_thread = None
@@ -1097,8 +1169,25 @@ class DataMonitorGUI:
         self.test_mode = False
         self.test_data = []
         self.test_index = 0
+        
+        # 显示半径相关变量
+        self.show_radius_enabled = False
+        self.beacon_distances = {}  # 存储当前计算的信标距离
+
+        # 绑定位置回调，确保所有位置数据都能更新历史和可视化
+        self.processor.on_location(self.handle_location_data)
 
         self.setup_gui()
+
+    def handle_location_data(self, location_data):
+        """接收MQTTDataProcessor传来的位置数据，更新历史并刷新可视化"""
+        device_id = location_data.get("device_id", "Unknown")
+        if device_id not in self.location_history:
+            self.location_history[device_id] = []
+        self.location_history[device_id].append(location_data)
+        # 自动刷新可视化
+        if hasattr(self, "auto_update_var") and getattr(self.auto_update_var, "get", lambda: True)():
+            self.update_visualization()
 
     def setup_gui(self):
         # 创建主选项卡控件
@@ -1296,6 +1385,10 @@ class DataMonitorGUI:
         # 新增：下一条按钮（可视化tab）
         self.next_test_button_viz = ttk.Button(control_frame, text="下一条", command=self.next_test_data, state="disabled")
         self.next_test_button_viz.pack(side=tk.LEFT, padx=(10, 10))
+        
+        # 新增：显示半径按钮
+        self.show_radius_button = ttk.Button(control_frame, text="显示半径", command=self.toggle_radius_display, state="disabled")
+        self.show_radius_button.pack(side=tk.LEFT, padx=(10, 10))
 
         # 创建matplotlib图形
         self.fig = Figure(figsize=(10, 8), dpi=100)
@@ -1401,6 +1494,7 @@ class DataMonitorGUI:
             self.ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
             self.ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
             self.ax.grid(True, alpha=0.3)
+            self.ax.set_aspect('equal', adjustable='box')  # 确保横纵比例尺相同
             self.ax.legend()
 
             self.canvas.draw()
@@ -1451,6 +1545,40 @@ class DataMonitorGUI:
                                             xytext=(10, 10), textcoords='offset points', 
                                             fontsize=10, fontweight='bold',
                                             bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.7))
+                
+                # 添加半径显示功能
+                if self.show_radius_enabled and hasattr(self, 'beacon_distances') and self.beacon_distances:
+                    from matplotlib.patches import Circle
+                    # 获取信标位置信息
+                    beacons = self.processor.location_calculator.get_all_beacons()
+                    if beacons:
+                        for mac, distance in self.beacon_distances.items():
+                            if mac in beacons:
+                                beacon_info = beacons[mac]
+                                beacon_lon = beacon_info['longitude']
+                                beacon_lat = beacon_info['latitude']
+                                
+                                # 将距离从米转换为经纬度差（近似）
+                                # 1度纬度 ≈ 111111米，1度经度 ≈ 111111*cos(lat)米
+                                lat_diff = distance / 111111.0  # 纬度差
+                                lon_diff = distance / (111111.0 * abs(math.cos(math.radians(beacon_lat))))  # 经度差
+                                
+                                # 创建圆形
+                                circle = Circle((beacon_lon, beacon_lat), 
+                                              radius=max(lat_diff, lon_diff),  # 使用较大的差值作为半径
+                                              fill=False, 
+                                              color='red', 
+                                              alpha=0.6, 
+                                              linewidth=1.5,
+                                              linestyle='--')
+                                self.ax.add_patch(circle)
+                                
+                                # 添加距离标签
+                                self.ax.annotate(f'{distance:.1f}m', 
+                                               (beacon_lon, beacon_lat),
+                                               xytext=(15, -15), textcoords='offset points',
+                                               fontsize=8, color='red',
+                                               bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
                 if all_lons and all_lats:
                     lon_margin = (max(all_lons) - min(all_lons)) * 0.1 or 0.001
                     lat_margin = (max(all_lats) - min(all_lats)) * 0.1 or 0.001
@@ -1465,6 +1593,7 @@ class DataMonitorGUI:
             self.ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
             self.ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.6f'))
             self.ax.grid(True, alpha=0.3)
+            self.ax.set_aspect('equal', adjustable='box')  # 确保横纵比例尺相同
             self.ax.legend()
             self.canvas.draw()
         except Exception as e:
@@ -1850,7 +1979,6 @@ class DataMonitorGUI:
         self.alt_entry.delete(0, tk.END)
 
     def import_local_bluetooth_file(self):
-        import json
         file_path = filedialog.askopenfilename(
             title="选择本地蓝牙数据Excel文件",
             filetypes=[("Excel文件", "*.xlsx *.xls")]
@@ -1859,7 +1987,7 @@ class DataMonitorGUI:
             return
         # 保存路径到json文件
         try:
-            with open("bluetooth_data_path.json", "w", encoding="utf-8") as f:
+            with open(DATA_PATH_JSON_PATH, "w", encoding="utf-8") as f:
                 json.dump({"path": file_path}, f)
                 self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 保存路径成功")
         except Exception as e:
@@ -1869,13 +1997,10 @@ class DataMonitorGUI:
 
     def use_default_local_bluetooth_file(self):
         """优先使用json文件中的路径，否则使用默认本地蓝牙数据文件（如data.xlsx）"""
-        import json
-        import os
-        json_path = "./config/bluetooth_data_path.json"
         file_path = "data.xlsx"
-        if os.path.exists(json_path):
+        if os.path.exists(DATA_PATH_JSON_PATH):
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(DATA_PATH_JSON_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if "path" in data and os.path.exists(data["path"]):
                         file_path = data["path"]
@@ -1884,56 +2009,16 @@ class DataMonitorGUI:
         self.processor.process_local_bluetooth_file(file_path)
         self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理本地蓝牙数据文件: {file_path}")
 
-    def test_first_timestamp_local_bluetooth_file(self):
-        """只处理本地蓝牙数据文件（优先json路径）第一个时间戳的数据"""
-        import pandas as pd
-        import os
-        import json
-        json_path = "./config/bluetooth_data_path.json"
-        file_path = "data.xlsx"
-        if os.path.exists(json_path):
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if "path" in data and os.path.exists(data["path"]):
-                        file_path = data["path"]
-            except Exception as e:
-                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取路径json失败: {e}")
-        if not os.path.exists(file_path):
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 本地蓝牙数据文件不存在: {file_path}")
-            return
-        try:
-            df = pd.read_excel(file_path, sheet_name="bluetooth_position_data")
-            grouped = df.groupby(['device_id', 'timestamp'])
-            # 只取第一个分组
-            for (device_id, timestamp), group in grouped:
-                items = [
-                    f"{row['mac']},{int(row['rssi'])},{int(row['rotation'])}"
-                    for _, row in group.iterrows()
-                ]
-                data_str = ";".join(items) + f";{device_id}"
-                try:
-                    bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
-                    self.processor.calculate_location_for_visualization(bluetooth_results)
-                    self.processor.calculate_and_save_location(bluetooth_results)
-                except Exception as e:
-                    self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
-                break  # 只处理第一个分组
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已测试处理本地蓝牙数据文件的第一个时间戳: {file_path}")
-        except Exception as e:
-            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
-
     def start_test_mode(self):
         import json
         import os
         file_path = "data.xlsx"
-        json_path = "./config/bluetooth_data_path.json"
         self.test_data = []
         self.test_index = 0
         self.test_mode = True
-        if os.path.exists(json_path):
+        if os.path.exists(DATA_PATH_JSON_PATH):
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(DATA_PATH_JSON_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if "path" in data and os.path.exists(data["path"]):
                         file_path = data["path"]
@@ -1943,7 +2028,10 @@ class DataMonitorGUI:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 本地蓝牙数据文件不存在: {file_path}")
             self.next_test_button.config(state="disabled")
             self.next_test_button_viz.config(state="disabled")
+            self.show_radius_button.config(state="disabled")
             return
+        else:
+            self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 使用本地蓝牙数据文件: {file_path}")
         try:
             import pandas as pd
             df = pd.read_excel(file_path, sheet_name="bluetooth_position_data")
@@ -1953,15 +2041,18 @@ class DataMonitorGUI:
             if self.test_data:
                 self.next_test_button.config(state="normal")
                 self.next_test_button_viz.config(state="normal")
+                self.show_radius_button.config(state="normal")
                 self.process_test_data(0)
             else:
                 self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 没有可用的测试数据")
                 self.next_test_button.config(state="disabled")
                 self.next_test_button_viz.config(state="disabled")
+                self.show_radius_button.config(state="disabled")
         except Exception as e:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 读取Excel文件失败: {e}")
             self.next_test_button.config(state="disabled")
             self.next_test_button_viz.config(state="disabled")
+            self.show_radius_button.config(state="disabled")
 
     def process_test_data(self, index):
         if 0 <= index < len(self.test_data):
@@ -1973,8 +2064,16 @@ class DataMonitorGUI:
             data_str = ";".join(items) + f";{device_id}"
             try:
                 bluetooth_results = self.processor.handle_bluetooth_position_data(data_str)
+                
+                # 存储信标距离信息用于半径显示
+                self.beacon_distances = {}
+                for result in bluetooth_results:
+                    if 'mac' in result and 'rssi' in result:
+                        distance = self.processor.location_calculator.rssi_to_distance(result['rssi'])
+                        self.beacon_distances[result['mac']] = distance
+                
                 # 多方法处理
-                methods = ["trilateration"]
+                methods = ["scipy_trilateration"]
                 #methods = ["trilateration", "weighted_centroid", "simple_centroid",'normal_trilateral']
                 for method in methods:
                     location_result = self.processor.location_calculator.calculate_terminal_location(bluetooth_results, method=method)
@@ -2000,6 +2099,7 @@ class DataMonitorGUI:
             self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试数据已全部处理完毕")
             self.next_test_button.config(state="disabled")
             self.next_test_button_viz.config(state="disabled")
+            self.show_radius_button.config(state="disabled")
 
     def next_test_data(self):
         if self.test_mode and self.test_data:
@@ -2010,6 +2110,7 @@ class DataMonitorGUI:
                 self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试数据已全部处理完毕")
                 self.next_test_button.config(state="disabled")
                 self.next_test_button_viz.config(state="disabled")
+                self.show_radius_button.config(state="disabled")
 
     def pause_recording(self):
         """暂停数据记录"""
@@ -2024,6 +2125,16 @@ class DataMonitorGUI:
             self.processor.resume_recording()
             self.pause_button.config(state="normal")
             self.resume_button.config(state="disabled")
+    
+    def toggle_radius_display(self):
+        """切换半径显示状态"""
+        self.show_radius_enabled = not self.show_radius_enabled
+        if self.show_radius_enabled:
+            self.show_radius_button.config(text="隐藏半径")
+        else:
+            self.show_radius_button.config(text="显示半径")
+        # 刷新可视化
+        self.update_visualization()
     
     def stop_recording(self):
         """停止数据记录"""
