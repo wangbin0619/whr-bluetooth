@@ -22,10 +22,10 @@ plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
-BEACON_DB_PATH = "./beacon/beacon_database.json"
+BEACON_DB_PATH = "./beacon/beacon_database2.json"
 LOCATION_CSV_PATH = "./output/terminal_locations.csv"
 DATA_PATH_JSON_PATH = "./config/bluetooth_data.json"
-
+STRATEGY1 = 'abandon' # 选择策略1: 'abandon'抛弃掉只有一个点的数据
 class ConfigManager:
     """配置管理类，负责读写YAML配置文件"""
     
@@ -101,10 +101,12 @@ class ConfigManager:
             self.config["mqtt"]["topic"] = topic
         self.save_config()
     
-    def set_rssi_model_config(self, tx_power, path_loss_exponent):
+    def set_rssi_model_config(self, tx_power, path_loss_exponent,a,b):
         """设置RSSI模型配置"""
         self.config["rssi_model"]["tx_power"] = tx_power
         self.config["rssi_model"]["path_loss_exponent"] = path_loss_exponent
+        self.config["rssi_model"]["a"] = a
+        self.config["rssi_model"]["b"] = b
         self.save_config()
     
     def get_optimization_config(self):
@@ -145,11 +147,13 @@ class BeaconLocationCalculator:
         self.location_csv_path = LOCATION_CSV_PATH
         self.init_location_csv()
     
-    def update_rssi_model_params(self, tx_power, path_loss_exponent):
+    def update_rssi_model_params(self, tx_power, path_loss_exponent,a,b):
         """更新RSSI模型参数"""
         self.tx_power = tx_power
         self.path_loss_exponent = path_loss_exponent
-        self.config_manager.set_rssi_model_config(tx_power, path_loss_exponent)
+        self.a = a
+        self.b = b
+        self.config_manager.set_rssi_model_config(tx_power, path_loss_exponent,a,b)
 
     def init_location_csv(self):
         """初始化位置记录CSV文件"""
@@ -227,17 +231,26 @@ class BeaconLocationCalculator:
         except Exception as e:
             print(f"保存信标数据库失败: {e}")
 
-    def rssi_to_distance(self, rssi, method="default", tx_power=-53.97, path_loss_exponent=2.36):
+    def rssi_to_distance(self, rssi, method="improved", tx_power=None, path_loss_exponent=None, b=None, a=None):
         """
         基于RSSI计算距离 (单位: 米)
         method: "default" 使用路径损失模型，"improved" 使用线性拟合模型
+        优先使用传入参数，否则使用配置文件参数。
         """
+        # 优先使用传入参数，否则用实例属性（配置文件），最后用默认值
+        if tx_power is None:
+            tx_power = getattr(self, 'tx_power', -53.97)
+        if path_loss_exponent is None:
+            path_loss_exponent = getattr(self, 'path_loss_exponent', 2.36)
+        if a is None:
+            a = getattr(self, 'a', -2.48)
+        if b is None:
+            b = getattr(self, 'b', 65.81)
+
         if method == "improved":
-            r = (-rssi - 49.8) / 3.57
+            r = (rssi + b) / a
             return max(r, 0.1)
         # 默认模型
-        tx_power = tx_power if tx_power is not None else self.tx_power
-        path_loss_exponent = path_loss_exponent if path_loss_exponent is not None else self.path_loss_exponent
         if rssi == 0:
             return -1.0
         exponent = (tx_power - rssi) / (10.0 * path_loss_exponent)
@@ -1044,7 +1057,7 @@ class MQTTDataProcessor:
                 # 传递位置数据给GUI用于可视化
                 self.fn_location(location_data) if self.fn_location else None
 
-                message = f"[{datetime.now().strftime('%H:%M:%S')}] 位置计算成功: ({location_result['latitude']:.6f}, {location_result['longitude']:.6f}), 方法: {location_result['method']}, 信标数: {location_result['beacon_count']}"
+                message = f"[{datetime.now().strftime('%H:%M:%S')}] 位置{self.location_id_counter}计算成功: ({location_result['latitude']:.6f}, {location_result['longitude']:.6f}), 方法: {location_result['method']}, 信标数: {location_result['beacon_count']}"
                 print(message)
                 self.fn_message(message) if self.fn_message else None
 
@@ -1652,6 +1665,7 @@ class DataMonitorGUI:
         ttk.Button(mqtt_button_frame, text="恢复默认", command=self.reset_mqtt_settings).pack(side=tk.LEFT)
 
         # RSSI模型设置框架
+
         rssi_frame = ttk.LabelFrame(main_frame, text="RSSI-距离模型参数", padding="10")
         rssi_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -1668,6 +1682,20 @@ class DataMonitorGUI:
         ttk.Label(path_loss_frame, text="路径损失指数:").pack(side=tk.LEFT, padx=(0, 5))
         self.path_loss_entry = ttk.Entry(path_loss_frame, width=10)
         self.path_loss_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 新增a参数设置
+        a_frame = ttk.Frame(rssi_frame)
+        a_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(a_frame, text="a参数:").pack(side=tk.LEFT, padx=(0, 5))
+        self.a_entry = ttk.Entry(a_frame, width=10)
+        self.a_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 新增b参数设置
+        b_frame = ttk.Frame(rssi_frame)
+        b_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(b_frame, text="b参数:").pack(side=tk.LEFT, padx=(0, 5))
+        self.b_entry = ttk.Entry(b_frame, width=10)
+        self.b_entry.pack(side=tk.LEFT, padx=(0, 10))
 
         # RSSI模型按钮
         rssi_button_frame = ttk.Frame(rssi_frame)
@@ -1702,9 +1730,13 @@ class DataMonitorGUI:
         # 加载RSSI模型设置
         rssi_config = self.config_manager.get_rssi_model_config()
         self.tx_power_entry.delete(0, tk.END)
-        self.tx_power_entry.insert(0, str(rssi_config["tx_power"]))
+        self.tx_power_entry.insert(0, str(rssi_config.get("tx_power", -53.97)))
         self.path_loss_entry.delete(0, tk.END)
-        self.path_loss_entry.insert(0, str(rssi_config["path_loss_exponent"]))
+        self.path_loss_entry.insert(0, str(rssi_config.get("path_loss_exponent", 2.36)))
+        self.a_entry.delete(0, tk.END)
+        self.a_entry.insert(0, str(rssi_config.get("a", -2.48)))
+        self.b_entry.delete(0, tk.END)
+        self.b_entry.insert(0, str(rssi_config.get("b", 65.81)))
 
         # 更新配置信息显示
         self.update_config_info_display()
@@ -1771,16 +1803,25 @@ class DataMonitorGUI:
         try:
             tx_power = float(self.tx_power_entry.get())
             path_loss_exponent = float(self.path_loss_entry.get())
+            a = float(self.a_entry.get()) if self.a_entry.get() else -2.48
+            b = float(self.b_entry.get()) if self.b_entry.get() else 65.81
 
             if path_loss_exponent <= 0:
                 messagebox.showerror("错误", "路径损失指数必须大于0")
                 return
 
-            self.config_manager.set_rssi_model_config(tx_power, path_loss_exponent)
-            
+            # 保存到配置
+            if "rssi_model" not in self.config_manager.config:
+                self.config_manager.config["rssi_model"] = {}
+            self.config_manager.config["rssi_model"]["tx_power"] = tx_power
+            self.config_manager.config["rssi_model"]["path_loss_exponent"] = path_loss_exponent
+            self.config_manager.config["rssi_model"]["a"] = a
+            self.config_manager.config["rssi_model"]["b"] = b
+            self.config_manager.save_config()
+
             # 更新处理器中的参数
             if self.processor:
-                self.processor.location_calculator.update_rssi_model_params(tx_power, path_loss_exponent)
+                self.processor.location_calculator.update_rssi_model_params(tx_power, path_loss_exponent,a,b)
             
             self.update_config_info_display()
             messagebox.showinfo("成功", "RSSI模型设置已保存")
@@ -1793,9 +1834,13 @@ class DataMonitorGUI:
     def reset_rssi_settings(self):
         """恢复RSSI模型默认设置"""
         self.tx_power_entry.delete(0, tk.END)
-        self.tx_power_entry.insert(0, "-59")
+        self.tx_power_entry.insert(0, "-53.97")
         self.path_loss_entry.delete(0, tk.END)
-        self.path_loss_entry.insert(0, "2.0")
+        self.path_loss_entry.insert(0, "2.36")
+        self.a_entry.delete(0, tk.END)
+        self.a_entry.insert(0, "-2.48")
+        self.b_entry.delete(0, tk.END)
+        self.b_entry.insert(0, "65.81")
 
     def update_config_info_display(self):
         """更新配置信息显示"""
@@ -1817,6 +1862,8 @@ class DataMonitorGUI:
             config_text += "RSSI-距离模型参数:\n"
             config_text += f"  1米处的RSSI值: {rssi_config['tx_power']} dBm\n"
             config_text += f"  路径损失指数: {rssi_config['path_loss_exponent']}\n\n"
+            config_text += f"  a参数: {rssi_config['a']}\n"
+            config_text += f"  b参数: {rssi_config['b']}\n\n"
             
             # 配置文件路径
             config_text += f"配置文件路径: {self.config_manager.config_file}\n"
@@ -2055,6 +2102,7 @@ class DataMonitorGUI:
             self.show_radius_button.config(state="disabled")
 
     def process_test_data(self, index):
+        #测试数据处理函数
         if 0 <= index < len(self.test_data):
             (device_id, timestamp, id_), group = self.test_data[index]
             items = [
@@ -2073,12 +2121,68 @@ class DataMonitorGUI:
                         self.beacon_distances[result['mac']] = distance
                 
                 # 多方法处理
-                methods = ["scipy_trilateration"]
-                #methods = ["trilateration", "weighted_centroid", "simple_centroid",'normal_trilateral']
+                methods = ["weight_centroid"]  # 可扩展为多方法 scipy_trilateration, weighted_centroid, simple_centroid, normal_trilateral
                 for method in methods:
-                    location_result = self.processor.location_calculator.calculate_terminal_location(bluetooth_results, method=method)
-                    if location_result and location_result["status"] in ["success", "fallback"]:
-                        # 兼容无device_id情况
+                    # 统计有效信标数
+                    valid_beacons = [r for r in bluetooth_results if r.get('mac') in self.processor.location_calculator.beacon_database]
+                    if len(valid_beacons) == 1:
+                        # 只有一个信标，返回该信标位置
+                        beacon_info = self.processor.location_calculator.beacon_database.get(valid_beacons[0]['mac'], {})
+                        location_result = {
+                            "status": "single_beacon",
+                            "latitude": beacon_info.get("latitude", 0),
+                            "longitude": beacon_info.get("longitude", 0),
+                            "accuracy": self.processor.location_calculator.rssi_to_distance(valid_beacons[0]['rssi']),
+                            "beacon_count": 1,
+                            "method": "single_beacon"
+                        }
+                        used_method = "single_beacon"
+                    elif len(valid_beacons) == 2:
+                        # 两个信标，使用加权质心
+                        beacon_positions = [[self.processor.location_calculator.beacon_database[r['mac']]['latitude'],
+                                             self.processor.location_calculator.beacon_database[r['mac']]['longitude']] for r in valid_beacons]
+                        rssi_values = [r['rssi'] for r in valid_beacons]
+                        distances = [self.processor.location_calculator.rssi_to_distance(r['rssi']) for r in valid_beacons]
+                        result = self.processor.location_calculator.weighted_centroid(beacon_positions, rssi_values)
+                        if result:
+                            location_result = {
+                                "status": "success",
+                                "latitude": result[0],
+                                "longitude": result[1],
+                                "accuracy": sum(distances) / len(distances),
+                                "beacon_count": 2,
+                                "method": "weighted_centroid"
+                            }
+                            used_method = "weighted_centroid"
+                        else:
+                            location_result = {
+                                "status": "error",
+                                "message": "加权质心计算失败",
+                                "beacon_count": 2
+                            }
+                            used_method = "failed"
+                    else:
+                        # 三个及以上信标，按method参数
+                        location_result = self.processor.location_calculator.calculate_terminal_location(
+                            bluetooth_results, method=method)
+                        used_method = method  # 默认方法名
+                        # 如果主方法失败，自动fallback到加权质心
+                        if not (location_result and location_result["status"] in ["success", "fallback"]):
+                            fallback_result = self.processor.location_calculator.calculate_terminal_location(
+                                bluetooth_results, method="weighted_centroid")
+                            if fallback_result and fallback_result["status"] == "success":
+                                location_result = fallback_result
+                                used_method = "weighted_centroid_fallback"
+                            else:
+                                used_method = "failed"
+                        else:
+                            # 如果主方法返回fallback，也标记
+                            if location_result["status"] == "fallback":
+                                used_method = location_result.get("method", "weighted_centroid_fallback")
+                            else:
+                                used_method = method
+
+                    if location_result and location_result.get("status") in ["success", "fallback", "single_beacon"]:
                         dev_id = bluetooth_results[0]["device_id"] if bluetooth_results and "device_id" in bluetooth_results[0] else device_id
                         if method not in self.location_history_method:
                             self.location_history_method[method] = {}
@@ -2088,11 +2192,14 @@ class DataMonitorGUI:
                             'longitude': location_result['longitude'],
                             'latitude': location_result['latitude'],
                             'timestamp': location_result.get('timestamp', ''),
-                            'accuracy': location_result['accuracy'],
-                            'method': location_result['method'],
+                            'accuracy': location_result.get('accuracy', 0),
+                            'method': used_method,
                             'device_id': dev_id
                         })
-                self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 已处理第{index+1}条测试数据（多方法）")
+                    # 输出方法和信标数
+                    self.message_queue.put(
+                        f"[{datetime.now().strftime('%H:%M:%S')}] 已处理第{index+1}条测试数据, 方法: {used_method}, 信标数: {location_result.get('beacon_count', 0)}"
+                    )
             except Exception as e:
                 self.message_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] 测试处理本地蓝牙数据时出错: {e}")
         else:
