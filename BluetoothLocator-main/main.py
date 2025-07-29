@@ -35,6 +35,11 @@ class ConfigManager:
             "rssi_model": {
                 "tx_power": -59,  # 1米处的RSSI值 (dBm)
                 "path_loss_exponent": 2.0  # 路径损失指数
+            },
+            "optimization": {
+                "use_multi_start": True,  # 是否使用多初始点优化
+                "num_starts": 10,  # 初始点数量
+                "search_radius": 0.001  # 搜索半径（度）
             }
         }
         self.load_config()
@@ -95,6 +100,23 @@ class ConfigManager:
         """设置RSSI模型配置"""
         self.config["rssi_model"]["tx_power"] = tx_power
         self.config["rssi_model"]["path_loss_exponent"] = path_loss_exponent
+        self.save_config()
+    
+    def get_optimization_config(self):
+        """获取优化算法配置"""
+        return self.config.get("optimization", {
+            "use_multi_start": True,
+            "num_starts": 10,
+            "search_radius": 0.001
+        })
+    
+    def set_optimization_config(self, use_multi_start=True, num_starts=10, search_radius=0.001):
+        """设置优化算法配置"""
+        if "optimization" not in self.config:
+            self.config["optimization"] = {}
+        self.config["optimization"]["use_multi_start"] = use_multi_start
+        self.config["optimization"]["num_starts"] = num_starts
+        self.config["optimization"]["search_radius"] = search_radius
         self.save_config()
 
 
@@ -200,16 +222,19 @@ class BeaconLocationCalculator:
         except Exception as e:
             print(f"保存信标数据库失败: {e}")
 
-    def rssi_to_distance(self, rssi, tx_power=-54.24, path_loss_exponent=2.76):
+    def rssi_to_distance(self, rssi, tx_power=-53.97, path_loss_exponent=2.36):
         """
         基于RSSI计算距离 (单位: 米)
         使用路径损失模型: RSSI = TxPower - 10 * n * log10(d)
         距离测试拟合结果：-54.24,2.76
+        拟合2 53.97 2.36
         """
         if tx_power is None:
             tx_power = self.tx_power
         if path_loss_exponent is None:
             path_loss_exponent = self.path_loss_exponent
+        self.tx_power = tx_power
+        self.path_loss_exponent = path_loss_exponent
         if rssi == 0:
             return -1.0
         exponent = (tx_power - rssi) / (10.0 * path_loss_exponent)
@@ -252,9 +277,9 @@ class BeaconLocationCalculator:
 
         return R * c
 
-    def trilateration(self, beacon_positions, distances,test_flag=False):
+    def trilateration(self, beacon_positions, distances, last_location=None, test_flag=False):
         """
-        三边测量算法计算位置
+        梯度下降测量算法计算位置
         beacon_positions: [(lat1, lon1), (lat2, lon2), (lat3, lon3), ...]
         distances: [d1, d2, d3, ...]
         """
@@ -263,9 +288,9 @@ class BeaconLocationCalculator:
         
         if test_flag:
             print("\n" + "="*60)
-            print("🔍 三边测量算法开始")
+            print("梯度下降测量算法开始")
             print("="*60)
-            print("📍 信标位置和期望距离:")
+            print("信标位置和期望距离:")
             for i, ((beacon_lat, beacon_lon), distance) in enumerate(zip(beacon_positions, distances)):
                 print(f"   信标{i+1}: 位置({beacon_lat:.6f}, {beacon_lon:.6f}), 期望距离: {distance:.3f}m")
         
@@ -283,7 +308,11 @@ class BeaconLocationCalculator:
                 calculated_distance = self.haversine_distance(
                     lat, lon, beacon_lat, beacon_lon)
                 distance_diff = calculated_distance - distances[i]
-                error = distance_diff ** 2
+                n = self.path_loss_exponent
+                #weight = abs(10 * n / (calculated_distance * math.log(10)) if calculated_distance > 0 else 0)
+                #error = (distance_diff ** 2)*(weight**2)
+                weight = abs(10 * n / (distances[i] * math.log(10)) if calculated_distance > 0 else 0)
+                error = (distance_diff ** 2)*weight if calculated_distance < 20 else 1000
                 individual_errors.append(error)
                 total_error += error
                 
@@ -292,7 +321,7 @@ class BeaconLocationCalculator:
                           f"差值={distance_diff:+.3f}m, 误差²={error:.6f}")
             
             if test_flag:
-                print(f"   ⚡ 总误差: {total_error:.6f}")
+                print(f"总误差: {total_error:.6f}")
             
             return total_error
 
@@ -310,9 +339,21 @@ class BeaconLocationCalculator:
                 print(f"\n初始点(信标质心): ({initial_lat:.6f}, {initial_lon:.6f})")
 
         try:
-            # 使用改进的梯度下降方法
-            result = self.simple_minimize(
-                error_function, [initial_lat, initial_lon])
+            # 根据配置选择优化方法
+            optimization_config = self.config_manager.get_optimization_config() if self.config_manager else {}
+            use_multi_start = optimization_config.get("use_multi_start", True)
+            
+            if use_multi_start:
+                num_starts = optimization_config.get("num_starts", 10)
+                search_radius = optimization_config.get("search_radius", 0.001)
+                # 使用多初始点梯度下降方法
+                result = self.multi_start_minimize(
+                    error_function, beacon_positions, last_location,
+                    num_starts=num_starts)
+            else:
+                # 使用单初始点梯度下降方法
+                result = self.simple_minimize(
+                    error_function, [initial_lat, initial_lon])
 
             # 验证结果的合理性
             if result:
@@ -343,6 +384,121 @@ class BeaconLocationCalculator:
         except Exception as e:
             print(f"三边测量计算失败: {e}")
             return None
+
+    def generate_initial_points(self, beacon_positions, last_location=None, num_points=10, search_radius=0.0001):
+        """生成多个初始点用于梯度下降算法
+        
+        Args:
+            beacon_positions: 信标位置列表 [(lat, lon), ...]
+            last_location: 上次定位结果 (lat, lon)
+            num_points: 生成初始点数量
+            search_radius: 搜索半径（度）
+        
+        Returns:
+            初始点列表 [(lat, lon), ...]
+        """
+        import random
+        initial_points = []
+        
+        # 计算信标质心
+        centroid_lat = sum(pos[0] for pos in beacon_positions) / len(beacon_positions)
+        centroid_lon = sum(pos[1] for pos in beacon_positions) / len(beacon_positions)
+        
+        # 策略1: 信标质心作为第一个初始点
+        initial_points.append([centroid_lat, centroid_lon])
+        
+        # 策略2: 如果有历史位置，将其作为初始点
+        if last_location:
+            initial_points.append(list(last_location))
+        
+        # 策略3: 在信标质心周围生成随机点
+        remaining_points = num_points - len(initial_points)
+        for _ in range(remaining_points):
+            # 在质心周围随机生成点
+            angle = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(0, search_radius)
+            lat_offset = radius * math.cos(angle)
+            lon_offset = radius * math.sin(angle)
+            
+            new_lat = centroid_lat + lat_offset
+            new_lon = centroid_lon + lon_offset
+            initial_points.append([new_lat, new_lon])
+        
+        # 策略4: 在信标形成的区域内均匀采样几个点
+        if len(beacon_positions) >= 3:
+            # 计算信标的边界框
+            min_lat = min(pos[0] for pos in beacon_positions)
+            max_lat = max(pos[0] for pos in beacon_positions)
+            min_lon = min(pos[1] for pos in beacon_positions)
+            max_lon = max(pos[1] for pos in beacon_positions)
+            
+            # 在边界框内添加几个网格点
+            for i in range(3):
+                for j in range(3):
+                    grid_lat = min_lat + (max_lat - min_lat) * (i + 0.5) / 3
+                    grid_lon = min_lon + (max_lon - min_lon) * (j + 0.5) / 3
+                    initial_points.append([grid_lat, grid_lon])
+        
+        return initial_points[:num_points]
+    
+    def multi_start_minimize(self, func, beacon_positions, last_location=None, 
+                           num_starts=10, epsilon=1e-5, learning_rate=1e-10, 
+                           max_iterations=1000, tolerance=1e-8, test_flag=False):
+        """多初始点梯度下降优化算法
+        
+        Args:
+            func: 目标函数
+            beacon_positions: 信标位置列表
+            last_location: 上次定位结果
+            num_starts: 初始点数量
+            其他参数与simple_minimize相同
+        
+        Returns:
+            最优解和相关信息
+        """
+        # 生成多个初始点
+        initial_points = self.generate_initial_points(
+            beacon_positions, last_location, num_starts)
+        
+        results = []
+        print(f"[多初始点优化] 开始测试{len(initial_points)}个初始点")
+        
+        for i, initial_point in enumerate(initial_points):
+            try:
+                print(f"\n--- 初始点 {i+1}/{len(initial_points)} ---")
+                result = self.simple_minimize(
+                    func, initial_point, epsilon, learning_rate, 
+                    max_iterations, tolerance, test_flag)
+                
+                if result:
+                    final_error = func(result)
+                    results.append({
+                        'point': result,
+                        'error': final_error,
+                        'initial_point': initial_point
+                    })
+                    #print(f"初始点{i+1}结果: {result}, 误差: {final_error:.6f}")
+                
+            except Exception as e:
+                print(f"初始点{i+1}优化失败: {e}")
+                continue
+        
+        if not results:
+            print("所有初始点都优化失败")
+            return None
+        
+        # 选择误差最小的结果
+        best_result = min(results, key=lambda x: x['error'])
+        print(f"\n[最优结果] 位置: {best_result['point']}, 误差: {best_result['error']:.6f}")
+        print(f"最优结果来自初始点: {best_result['initial_point']}")
+        
+        # 输出所有结果的统计信息
+        errors = [r['error'] for r in results]
+        print(f"[统计信息] 成功优化: {len(results)}/{len(initial_points)}")
+        print(f"误差范围: {min(errors):.6f} - {max(errors):.6f}")
+        print(f"误差均值: {sum(errors)/len(errors):.6f}")
+        
+        return best_result['point']
 
     def simple_minimize(self, func, initial_point,epsilon=1e-5, learning_rate=1e-10, max_iterations=1000, tolerance=1e-8,test_flag=False):
         """改进的梯度下降优化算法，输出过程信息"""
@@ -475,7 +631,7 @@ class BeaconLocationCalculator:
                 valid_readings.append(reading)
                 beacon_positions.append(
                     [beacon_info["latitude"], beacon_info["longitude"]])
-                distances.append(self.rssi_to_distance(rssi))
+                distances.append(self.calculate_distance_improved(rssi))
                 rssi_values.append(rssi)
 
         if len(valid_readings) == 0:
@@ -516,7 +672,11 @@ class BeaconLocationCalculator:
         else:
             # 三个及以上信标，根据method参数选择算法
             if method == "trilateration":
-                result = self.trilateration(beacon_positions, distances,test_flag=False)
+                # 获取历史位置
+                last_location = None
+                if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
+                    last_location = self.location_history[-1]
+                result = self.trilateration(beacon_positions, distances, last_location, test_flag=False)
                 used_method = "trilateration"
             elif method == "weighted_centroid":
                 result = self.weighted_centroid(beacon_positions, rssi_values)
@@ -531,7 +691,11 @@ class BeaconLocationCalculator:
                 used_method = "simple_centroid"
             else:
                 # 默认三边测量
-                result = self.trilateration(beacon_positions, distances)
+                # 获取历史位置
+                last_location = None
+                if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
+                    last_location = self.location_history[-1]
+                result = self.trilateration(beacon_positions, distances, last_location)
                 used_method = "trilateration"
                 print(f"使用默认方法: {used_method}")
             if result:
