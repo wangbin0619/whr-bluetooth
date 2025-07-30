@@ -715,13 +715,32 @@ class BeaconLocationCalculator:
                 distances.append(self.rssi_to_distance(rssi))
                 rssi_values.append(rssi)
 
-        if len(valid_readings) == 0:
+        # 调用共用方法处理不同信标数量的情况
+        return self._process_beacons_by_count(valid_readings, beacon_positions, distances, rssi_values, method)
+
+    def _process_beacons_by_count(self, valid_readings, beacon_positions, distances, rssi_values, method="scipy_trilateration"):
+        """
+        根据信标数量选择不同的定位算法（共用方法）
+        
+        Args:
+            valid_readings: 有效的蓝牙读数列表
+            beacon_positions: 信标位置列表 [[lat, lon], ...]
+            distances: 距离列表
+            rssi_values: RSSI值列表  
+            method: 定位方法名称
+            
+        Returns:
+            dict: 定位结果
+        """
+        beacon_count = len(valid_readings)
+        
+        if beacon_count == 0:
             return {
                 "status": "error",
                 "message": "没有找到已知位置的信标",
                 "beacon_count": 0
             }
-        elif len(valid_readings) == 1:
+        elif beacon_count == 1:
             # 只有一个信标，返回该信标位置
             beacon_pos = beacon_positions[0]
             return {
@@ -732,7 +751,7 @@ class BeaconLocationCalculator:
                 "beacon_count": 1,
                 "method": "single_beacon"
             }
-        elif len(valid_readings) == 2:
+        elif beacon_count == 2:
             # 两个信标，使用加权质心
             result = self.weighted_centroid(beacon_positions, rssi_values)
             if result:
@@ -758,17 +777,16 @@ class BeaconLocationCalculator:
                 if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
                     last_location = self.location_history[-1]
                 result = self.trilateration(beacon_positions, distances, last_location, test_flag=False)
-                used_method = "trilateration"#test
+                used_method = "trilateration"
             elif method == "scipy_trilateration":
                 last_location = None
                 if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
                     last_location = self.location_history[-1]
                 result = self.scipy_trilateration(beacon_positions, distances, last_location, test_flag=False)
                 used_method = "scipy_trilateration"
-            elif method == "weighted_centroid":
+            elif method == "weighted_centroid" or method == "weight_centroid":
                 result = self.weighted_centroid(beacon_positions, rssi_values)
                 used_method = "weighted_centroid"
-            
             elif method == "normal_trilateral":
                 result = self.normal_trilateral(beacon_positions, distances)
                 used_method = "normal_trilateral"
@@ -779,13 +797,12 @@ class BeaconLocationCalculator:
                 used_method = "simple_centroid"
             else:
                 # 默认三边测量
-                # 获取历史位置
                 last_location = None
                 if hasattr(self, 'location_history') and self.location_history and len(self.location_history) > 0:
                     last_location = self.location_history[-1]
                 result = self.trilateration(beacon_positions, distances, last_location)
                 used_method = "trilateration"
-                print(f"使用默认方法: {used_method}")
+                
             if result:
                 accuracy = sum(distances) / len(distances)
                 return {
@@ -793,7 +810,7 @@ class BeaconLocationCalculator:
                     "latitude": result[0],
                     "longitude": result[1],
                     "accuracy": accuracy,
-                    "beacon_count": len(valid_readings),
+                    "beacon_count": beacon_count,
                     "method": used_method
                 }
             else:
@@ -805,14 +822,14 @@ class BeaconLocationCalculator:
                         "latitude": fallback[0],
                         "longitude": fallback[1],
                         "accuracy": sum(distances) / len(distances),
-                        "beacon_count": len(valid_readings),
+                        "beacon_count": beacon_count,
                         "method": "weighted_centroid_fallback"
                     }
                 else:
                     return {
                         "status": "error",
                         "message": "所有定位方法都失败",
-                        "beacon_count": len(valid_readings)
+                        "beacon_count": beacon_count
                     }
 
 class MQTTDataProcessor:
@@ -2123,64 +2140,15 @@ class DataMonitorGUI:
                 # 多方法处理
                 methods = ["weight_centroid"]  # 可扩展为多方法 scipy_trilateration, weighted_centroid, simple_centroid, normal_trilateral
                 for method in methods:
-                    # 统计有效信标数
-                    valid_beacons = [r for r in bluetooth_results if r.get('mac') in self.processor.location_calculator.beacon_database]
-                    if len(valid_beacons) == 1:
-                        # 只有一个信标，返回该信标位置
-                        beacon_info = self.processor.location_calculator.beacon_database.get(valid_beacons[0]['mac'], {})
-                        location_result = {
-                            "status": "single_beacon",
-                            "latitude": beacon_info.get("latitude", 0),
-                            "longitude": beacon_info.get("longitude", 0),
-                            "accuracy": self.processor.location_calculator.rssi_to_distance(valid_beacons[0]['rssi']),
-                            "beacon_count": 1,
-                            "method": "single_beacon"
-                        }
-                        used_method = "single_beacon"
-                    elif len(valid_beacons) == 2:
-                        # 两个信标，使用加权质心
-                        beacon_positions = [[self.processor.location_calculator.beacon_database[r['mac']]['latitude'],
-                                             self.processor.location_calculator.beacon_database[r['mac']]['longitude']] for r in valid_beacons]
-                        rssi_values = [r['rssi'] for r in valid_beacons]
-                        distances = [self.processor.location_calculator.rssi_to_distance(r['rssi']) for r in valid_beacons]
-                        result = self.processor.location_calculator.weighted_centroid(beacon_positions, rssi_values)
-                        if result:
-                            location_result = {
-                                "status": "success",
-                                "latitude": result[0],
-                                "longitude": result[1],
-                                "accuracy": sum(distances) / len(distances),
-                                "beacon_count": 2,
-                                "method": "weighted_centroid"
-                            }
-                            used_method = "weighted_centroid"
-                        else:
-                            location_result = {
-                                "status": "error",
-                                "message": "加权质心计算失败",
-                                "beacon_count": 2
-                            }
-                            used_method = "failed"
+                    # 直接使用共用方法处理所有情况
+                    location_result = self.processor.location_calculator.calculate_terminal_location(
+                        bluetooth_results, method=method)
+                    
+                    # 设置使用的方法名
+                    if location_result:
+                        used_method = location_result.get("method", method)
                     else:
-                        # 三个及以上信标，按method参数
-                        location_result = self.processor.location_calculator.calculate_terminal_location(
-                            bluetooth_results, method=method)
-                        used_method = method  # 默认方法名
-                        # 如果主方法失败，自动fallback到加权质心
-                        if not (location_result and location_result["status"] in ["success", "fallback"]):
-                            fallback_result = self.processor.location_calculator.calculate_terminal_location(
-                                bluetooth_results, method="weighted_centroid")
-                            if fallback_result and fallback_result["status"] == "success":
-                                location_result = fallback_result
-                                used_method = "weighted_centroid_fallback"
-                            else:
-                                used_method = "failed"
-                        else:
-                            # 如果主方法返回fallback，也标记
-                            if location_result["status"] == "fallback":
-                                used_method = location_result.get("method", "weighted_centroid_fallback")
-                            else:
-                                used_method = method
+                        used_method = "failed"
 
                     if location_result and location_result.get("status") in ["success", "fallback", "single_beacon"]:
                         dev_id = bluetooth_results[0]["device_id"] if bluetooth_results and "device_id" in bluetooth_results[0] else device_id
